@@ -1,150 +1,178 @@
-// Solmar Heat — pedestrians.
-// Ordinary people of Port Solmar: they stroll the sidewalks, wait at corners,
-// and run for their lives when shots ring out or a car mounts the kerb. They
-// are the city breathing, and the reason reckless driving has consequences.
+// San Cielo Heat — pedestrians: locals strolling the sidewalks who
+// scatter when guns fire or cars mount the kerb.
 
-import { TUNING, rand, randi, choice, dist, angleTo, clamp } from './config.js';
-import { randomSidewalkPoint, collideCircle } from './city.js';
-import { Effects } from './effects.js';
+import { TUNING, WORLD } from './config.js';
+import { collideCircle, randomSidewalkPoint } from './city.js';
+import { angleTo, clamp, dist, makeRng } from './util.js';
 
-const SHIRTS = ['#d85858', '#58a0d8', '#e8c53d', '#7fc86a', '#c88ad8', '#e8e8e8', '#5a5a66', '#e87f3d', '#4fb8c8'];
-const PANTS = ['#3a4a6b', '#5a4a3a', '#2c2c34', '#6b6b7a', '#4a5a3a'];
-const SKINS = ['#e8b98a', '#c98a5a', '#8a5a3a', '#f2d0a8', '#6a4530'];
-const HAIRS = ['#4a3220', '#1c1c22', '#c8a848', '#8a8a8a', '#b05028', '#2c2c34'];
+const SHIRTS = ['#d95f4b', '#4b8ad9', '#e0a83c', '#5da56a', '#8a5aa8', '#e8e3d3', '#3a4a5a', '#e87a9a'];
+const PANTS = ['#3a4a5a', '#2b2b30', '#6b5a44', '#4a6b8a', '#7a7a7a'];
+const SKINS = ['#f2c9a0', '#e0ac82', '#c98a5e', '#a06a42', '#8a5432'];
+const HAIRS = ['#2b2b30', '#6b4a2a', '#c9a24b', '#8a8a8a', '#3a2a1a', '#d95f4b'];
 
-export function makePed(x, y) {
-  return {
-    x, y, angle: rand(0, Math.PI * 2),
-    shirt: choice(SHIRTS), pants: choice(PANTS), skin: choice(SKINS), hair: choice(HAIRS),
-    phase: rand(0, Math.PI * 2),
-    waypoint: randomSidewalkPoint(),
-    state: 'walk', // walk | idle | flee | dead
-    idleTimer: rand(0, 4),
-    fleeTimer: 0,
-    fleeFrom: null,
-    moving: false,
-    dead: false,
-    deadTimer: 0,
-    speed: rand(45, 70),
-    scared: false,
-  };
-}
-
-export function spawnPeds(state, count) {
-  for (let i = 0; i < count; i++) {
-    const p = randomSidewalkPoint();
-    // Keep the player's doorstep clear at spawn time.
-    if (dist(p.x, p.y, state.player.x, state.player.y) < 120) continue;
-    state.peds.push(makePed(p.x, p.y));
+export class PedSystem {
+  constructor(city) {
+    this.city = city;
+    this.peds = [];
+    this.rng = makeRng(424242);
   }
-}
 
-export function scarePeds(state, x, y, radius) {
-  for (const ped of state.peds) {
-    if (ped.dead) continue;
-    if (dist(ped.x, ped.y, x, y) < radius) {
+  spawnInitial(count) {
+    for (let i = 0; i < count; i++) this.spawnPed();
+  }
+
+  makeLook() {
+    return {
+      shirt: this.rng.pick(SHIRTS),
+      pants: this.rng.pick(PANTS),
+      skin: this.rng.pick(SKINS),
+      hair: this.rng.pick(HAIRS),
+    };
+  }
+
+  spawnPed(x, y) {
+    const spot = x !== undefined ? { x, y } : randomSidewalkPoint(this.city, this.rng);
+    const ped = {
+      x: spot.x,
+      y: spot.y,
+      angle: this.rng.range(0, Math.PI * 2),
+      look: this.makeLook(),
+      state: 'walk', // walk | flee | down
+      target: null,
+      wait: 0,
+      walkPhase: this.rng.range(0, Math.PI * 2),
+      speed: TUNING.pedWalk * this.rng.range(0.8, 1.2),
+      fleeTimer: 0,
+      health: 30,
+    };
+    this.peds.push(ped);
+    return ped;
+  }
+
+  scareAt(x, y, radius) {
+    for (const p of this.peds) {
+      if (p.state === 'down') continue;
+      if (dist(p.x, p.y, x, y) < radius) {
+        p.state = 'flee';
+        p.fleeTimer = 4 + Math.random() * 3;
+        p.angle = angleTo(x, y, p.x, p.y);
+      }
+    }
+  }
+
+  // True when a pedestrian stands in the cone ahead of a moving car.
+  pedAhead(x, y, angle, range) {
+    const fx = Math.cos(angle);
+    const fy = Math.sin(angle);
+    for (const p of this.peds) {
+      if (p.state === 'down') continue;
+      const dx = p.x - x;
+      const dy = p.y - y;
+      const forward = dx * fx + dy * fy;
+      const side = Math.abs(-dx * fy + dy * fx);
+      if (forward > 0 && forward < range && side < 24) return true;
+    }
+    return false;
+  }
+
+  nearest(x, y, radius) {
+    let best = null;
+    let bestD = radius;
+    for (const p of this.peds) {
+      if (p.state === 'down') continue;
+      const d = dist(p.x, p.y, x, y);
+      if (d < bestD) { bestD = d; best = p; }
+    }
+    return best;
+  }
+
+  hurtPed(game, ped, damage, fromX, fromY) {
+    ped.health -= damage;
+    game.effects.blood(ped.x, ped.y);
+    if (ped.health <= 0 && ped.state !== 'down') {
+      ped.state = 'down';
+      game.effects.floater(ped.x, ped.y - 18, 'DOWN', '#ff6a5a');
+      this.scareAt(ped.x, ped.y, 320);
+    } else {
       ped.state = 'flee';
-      ped.fleeTimer = rand(2.5, 5);
-      ped.fleeFrom = { x, y };
-      ped.scared = true;
+      ped.fleeTimer = 5;
+      ped.angle = angleTo(fromX, fromY, ped.x, ped.y);
+      this.scareAt(ped.x, ped.y, 200);
     }
   }
-}
 
-export function updatePeds(state, dt) {
-  const player = state.player;
-  for (let i = state.peds.length - 1; i >= 0; i--) {
-    const ped = state.peds[i];
-    if (ped.dead) {
-      ped.deadTimer -= dt;
-      if (ped.deadTimer <= 0) state.peds.splice(i, 1);
-      continue;
-    }
-    // A speeding car bearing down scares people off the road.
-    if (ped.state !== 'flee') {
-      for (const car of state.cars) {
-        if (Math.abs(car.speed) < 120) continue;
-        const aheadX = car.x + Math.cos(car.angle) * 70;
-        const aheadY = car.y + Math.sin(car.angle) * 70;
-        if (dist(aheadX, aheadY, ped.x, ped.y) < 40) {
-          ped.state = 'flee';
-          ped.fleeTimer = rand(2, 4);
-          ped.fleeFrom = { x: car.x, y: car.y };
+  update(dt, game) {
+    const px = game.player.x;
+    const py = game.player.y;
+    for (const p of this.peds) {
+      if (p.state === 'down') continue;
+      p.walkPhase += dt * (p.state === 'flee' ? 11 : 6);
+      if (p.state === 'flee') {
+        p.fleeTimer -= dt;
+        const sp = TUNING.pedFlee;
+        p.x += Math.cos(p.angle) * sp * dt;
+        p.y += Math.sin(p.angle) * sp * dt;
+        const probe = { x: p.x, y: p.y, radius: 11 };
+        if (collideCircle(this.city, probe)) {
+          p.x = probe.x;
+          p.y = probe.y;
+          p.angle += Math.PI / 2 + Math.random() * 0.6; // slide along the wall
+        }
+        if (p.fleeTimer <= 0) p.state = 'walk';
+        continue;
+      }
+      // Strolling: pick a nearby sidewalk target, walk to it, pause.
+      if (p.wait > 0) {
+        p.wait -= dt;
+        continue;
+      }
+      if (!p.target) {
+        p.target = randomSidewalkPoint(this.city, this.rng);
+        if (dist(p.x, p.y, p.target.x, p.target.y) > 700) p.target = null;
+      }
+      if (p.target) {
+        const want = angleTo(p.x, p.y, p.target.x, p.target.y);
+        let d = want - p.angle;
+        while (d > Math.PI) d -= Math.PI * 2;
+        while (d < -Math.PI) d += Math.PI * 2;
+        p.angle += clamp(d, -3 * dt, 3 * dt);
+        p.x += Math.cos(p.angle) * p.speed * dt;
+        p.y += Math.sin(p.angle) * p.speed * dt;
+        const probe = { x: p.x, y: p.y, radius: 11 };
+        if (collideCircle(this.city, probe)) {
+          p.x = probe.x;
+          p.y = probe.y;
+          p.target = null;
+        }
+        if (p.target && dist(p.x, p.y, p.target.x, p.target.y) < 24) {
+          p.target = null;
+          p.wait = Math.random() * 3;
+        }
+      }
+      // A car roaring onto the sidewalk sends everyone running.
+      for (const car of game.allCars) {
+        if (car.wrecked) continue;
+        const sp = Math.hypot(car.vx, car.vy);
+        if (sp > 130 && dist(p.x, p.y, car.x, car.y) < 90) {
+          p.state = 'flee';
+          p.fleeTimer = 3;
+          p.angle = angleTo(car.x, car.y, p.x, p.y);
           break;
         }
       }
     }
-
-    let tx, ty, speed;
-    if (ped.state === 'flee') {
-      ped.fleeTimer -= dt;
-      const away = angleTo(ped.fleeFrom.x, ped.fleeFrom.y, ped.x, ped.y);
-      tx = ped.x + Math.cos(away) * 100;
-      ty = ped.y + Math.sin(away) * 100;
-      speed = TUNING.pedFlee;
-      if (ped.fleeTimer <= 0) {
-        ped.state = 'walk';
-        ped.waypoint = randomSidewalkPoint();
-      }
-    } else if (ped.state === 'idle') {
-      ped.idleTimer -= dt;
-      ped.moving = false;
-      if (ped.idleTimer <= 0) {
-        ped.state = 'walk';
-        ped.waypoint = randomSidewalkPoint();
-      }
-      continue;
-    } else {
-      tx = ped.waypoint.x; ty = ped.waypoint.y;
-      speed = ped.speed;
-      if (dist(ped.x, ped.y, tx, ty) < 18) {
-        if (Math.random() < 0.3) {
-          ped.state = 'idle';
-          ped.idleTimer = rand(2, 7);
-        } else {
-          ped.waypoint = randomSidewalkPoint();
-        }
-        continue;
+    // Keep the streets populated near the player.
+    if (this.peds.filter((p) => p.state !== 'down').length < 34) this.spawnPed();
+    for (let i = this.peds.length - 1; i >= 0; i--) {
+      const p = this.peds[i];
+      if (p.state === 'down' && dist(p.x, p.y, px, py) > 900) this.peds.splice(i, 1);
+      else if (dist(p.x, p.y, px, py) > 1500) {
+        const spot = randomSidewalkPoint(this.city, this.rng);
+        p.x = spot.x;
+        p.y = spot.y;
+        p.state = 'walk';
+        p.target = null;
       }
     }
-
-    const want = angleTo(ped.x, ped.y, tx, ty);
-    let diff = want - ped.angle;
-    while (diff > Math.PI) diff -= Math.PI * 2;
-    while (diff < -Math.PI) diff += Math.PI * 2;
-    ped.angle += clamp(diff, -3.2 * dt, 3.2 * dt);
-    const circle = { x: ped.x + Math.cos(ped.angle) * speed * dt, y: ped.y + Math.sin(ped.angle) * speed * dt, radius: 10 };
-    collideCircle(state.city, circle);
-    ped.x = circle.x; ped.y = circle.y;
-    ped.moving = true;
-  }
-
-  // Keep the sidewalks populated near the player.
-  let near = 0;
-  for (const ped of state.peds) if (!ped.dead && dist(ped.x, ped.y, player.x, player.y) < 1100) near++;
-  if (near < 34 && Math.random() < dt * 2) {
-    const p = randomSidewalkPoint();
-    if (dist(p.x, p.y, player.x, player.y) > 450 && dist(p.x, p.y, player.x, player.y) < 1100) {
-      state.peds.push(makePed(p.x, p.y));
-    }
-  }
-  // Recycle far-away peds.
-  for (let i = state.peds.length - 1; i >= 0; i--) {
-    if (dist(state.peds[i].x, state.peds[i].y, player.x, player.y) > 1400) state.peds.splice(i, 1);
-  }
-}
-
-// A car strike: peds go down hard, and the city notices.
-export function hitPedByCar(state, ped, car) {
-  if (ped.dead) return;
-  ped.dead = true;
-  ped.deadTimer = 18;
-  ped.angle += rand(-1, 1);
-  Effects.blood(ped.x, ped.y);
-  Effects.floatText(ped.x, ped.y - 20, '!', '#ff5050');
-  scarePeds(state, ped.x, ped.y, 260);
-  if (car.driver === 'player') {
-    state.stats.pedsHit++;
-    state.police.addHeat(state, 1, 'You ran someone down!');
   }
 }

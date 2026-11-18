@@ -4,29 +4,17 @@
 [![rank](https://make.fun/badge/gta6-01/nurdiyanto-87/gta6-01/rank.svg)](https://make.fun/bounty/gta6-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
 [![reward](https://make.fun/badge/gta6-01/nurdiyanto-87/gta6-01/reward.svg)](https://make.fun/bounty/gta6-01?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
 
-**Solmar Heat** — an original open-world crime game set in the sun-soaked city of Port Solmar. Leo Marsh arrives broke and works his way up from a favour at Rosa's Diner to breaking Victor Kroll's grip on the city, across six story missions plus repeatable courier jobs.
-
-What is in the game:
-
-- A 3200×3200 explorable city with five districts, eight named landmarks, a beach, a pier and a central park — the same fixed-seed city every run
-- On foot and by car: walk, sprint, steal any of nine vehicle types and drive with arcade physics, handbrake slides and damage smoke
-- Living streets: traffic that cruises the grid and brakes for what is ahead, and pedestrians who stroll, wait and flee
-- A five-star wanted system: pursuing interceptors that ram and box you in, roadblocks at three stars, evasion by breaking line of sight, and a paid repaint at the garage to go clean
-- Combat with three weapons (pistol, SMG, shotgun), projectiles with travel and range, enemies who close in, strafe and shoot, and pickups for health, armour, ammo and hidden cash stashes
-- A HUD with health/armour bars, cash, wanted stars, weapon and ammo, an objective banner, an off-screen objective arrow and a live minimap
-- A title screen, pause menu, how-to-play screen and localStorage saves (after every job and at the safehouse)
-- Fully procedural WebAudio sound: synth gunshots, engine hum, siren, and an original chord-loop melody — no audio files
-
-No libraries, no engine, no network requests: vanilla JavaScript and Canvas 2D, split into one-job modules under `game/src/`. Everything — the city, characters, vehicles, names, story, art and sounds — is original to this game.
+**San Cielo Heat** — an original open-world crime game in the spirit of GTA 6, built for make.fun's "Make GTA 6" bounty. Explore the sun-soaked city of San Cielo on foot and by car: steal any of 9 vehicle types, dodge traffic and pedestrians, earn wanted stars and outrun the SCPD (or pay for a respray), fight armed goons with fists, pistol and SMG, and run a 6-mission story arc for Ram — plus repeatable courier jobs, a live minimap, saves, and fully procedural WebAudio sound. Vanilla JavaScript + Canvas 2D, zero libraries, zero network requests. Every name, character, vehicle, street and sound is original.
 
 ## Run it
 
 ```sh
-python3 -m http.server 8080 --directory game
-# then open http://localhost:8080 in desktop Chrome
+node -e "require('node:http').createServer((q,s)=>{const fs=require('node:fs'),p=require('node:path');let f=p.join('game',q.url==='/'?'index.html':q.url);fs.readFile(f,(e,d)=>{if(e){s.writeHead(404);s.end()}else{s.writeHead(200,{'Content-Type':f.endsWith('.js')?'text/javascript':f.endsWith('.css')?'text/css':'text/html'});s.end(d)}})}).listen(8080)" 
 ```
 
-Keyboard and mouse: WASD move/drive, mouse aim, click shoot, F enter/exit car, E interact, R reload, 1/2/3 weapons, Space handbrake, Esc pause, M mute.
+Then open http://localhost:8080 — or serve `game/` with any static file server.
+
+Controls: WASD walk/drive · Shift run · Space handbrake · Mouse aim · Click shoot · E enter/exit car & start jobs · 1/2/3 weapons · P pause · M mute.
 
 ---
 

@@ -1,62 +1,84 @@
-// Solmar Heat — the camera.
-// A soft follow camera that leads the player's motion, pulls back at speed
-// so driving reads ahead, and shakes with impacts. All world drawing goes
-// through its transform.
+// San Cielo Heat — the chase camera: smooth follow, speed zoom-out,
+// and impact shake. The world is drawn through this transform.
 
-import { WORLD, clamp, lerp } from './config.js';
+import { WORLD } from './config.js';
+import { clamp, damp, lerp } from './util.js';
 
-export function createCamera(viewW, viewH) {
-  return {
-    x: WORLD / 2, y: WORLD / 2, // centre of the view, in world pixels
-    viewW, viewH,
-    zoom: 1,
-    targetZoom: 1,
+export class Camera {
+  constructor(viewW, viewH) {
+    this.x = WORLD / 2;
+    this.y = WORLD / 2;
+    this.viewW = viewW;
+    this.viewH = viewH;
+    this.zoom = 1;
+    this.shake = 0;
+    this.shakeX = 0;
+    this.shakeY = 0;
+  }
 
-    update(focusX, focusY, speedNorm, dt, shakeOffset) {
-      // Lead the motion slightly so the player sees where they are going.
-      const lead = 26 + speedNorm * 60;
-      const tx = focusX + (this.lookX || 0) * lead;
-      const ty = focusY + (this.lookY || 0) * lead;
-      const k = 1 - Math.pow(0.0015, dt); // frame-rate independent smoothing
-      this.x = lerp(this.x, tx, k);
-      this.y = lerp(this.y, ty, k);
-      // Pull back as speed rises: 1.0 on foot, 0.82 flat out.
-      this.targetZoom = 1 - speedNorm * 0.18;
-      this.zoom = lerp(this.zoom, this.targetZoom, Math.min(1, dt * 2.5));
-      // Clamp the view inside the world.
-      const hw = this.viewW / 2 / this.zoom, hh = this.viewH / 2 / this.zoom;
-      this.x = clamp(this.x, hw, WORLD - hw);
-      this.y = clamp(this.y, hh, WORLD - hh);
-      if (shakeOffset) {
-        this.sx = shakeOffset.x;
-        this.sy = shakeOffset.y;
-      } else {
-        this.sx = 0; this.sy = 0;
-      }
-    },
+  resize(viewW, viewH) {
+    this.viewW = viewW;
+    this.viewH = viewH;
+  }
 
-    // The direction the focus is moving, set by the game each frame.
-    lookX: 0, lookY: 0,
-    sx: 0, sy: 0,
+  snapTo(x, y) {
+    this.x = x;
+    this.y = y;
+  }
 
-    apply(ctx) {
-      ctx.save();
-      ctx.translate(this.viewW / 2, this.viewH / 2);
-      ctx.scale(this.zoom, this.zoom);
-      ctx.translate(-this.x + this.sx, -this.y + this.sy);
-    },
+  follow(targetX, targetY, speed, dt) {
+    // Lead slightly in the direction of travel so fast driving reads ahead.
+    const lead = clamp(speed / 300, 0, 1) * 40;
+    const tx = targetX + Math.cos(this.leadAngle || 0) * lead;
+    const ty = targetY + Math.sin(this.leadAngle || 0) * lead;
+    this.x = damp(this.x, tx, 5, dt);
+    this.y = damp(this.y, ty, 5, dt);
+    const wantZoom = speed > 220 ? 0.88 : speed > 120 ? 0.95 : 1;
+    this.zoom = damp(this.zoom, wantZoom, 2.5, dt);
+    if (this.shake > 0) {
+      this.shake = Math.max(0, this.shake - dt * 26);
+      this.shakeX = (Math.random() - 0.5) * this.shake;
+      this.shakeY = (Math.random() - 0.5) * this.shake;
+    } else {
+      this.shakeX = 0;
+      this.shakeY = 0;
+    }
+  }
 
-    screenToWorld(sx, sy) {
-      return {
-        x: (sx - this.viewW / 2) / this.zoom + this.x - this.sx,
-        y: (sy - this.viewH / 2) / this.zoom + this.y - this.sy,
-      };
-    },
+  setLeadAngle(angle) {
+    this.leadAngle = angle;
+  }
 
-    visibleRect() {
-      const hw = this.viewW / 2 / this.zoom + 40;
-      const hh = this.viewH / 2 / this.zoom + 40;
-      return { x: this.x - hw, y: this.y - hh, w: hw * 2, h: hh * 2 };
-    },
-  };
+  addShake(amount) {
+    this.shake = Math.min(18, this.shake + amount);
+  }
+
+  apply(ctx) {
+    ctx.save();
+    ctx.translate(this.viewW / 2 + this.shakeX, this.viewH / 2 + this.shakeY);
+    ctx.scale(this.zoom, this.zoom);
+    ctx.translate(-this.x, -this.y);
+  }
+
+  restore(ctx) {
+    ctx.restore();
+  }
+
+  viewBounds() {
+    const hw = this.viewW / 2 / this.zoom;
+    const hh = this.viewH / 2 / this.zoom;
+    return { x0: this.x - hw - 40, y0: this.y - hh - 40, x1: this.x + hw + 40, y1: this.y + hh + 40 };
+  }
+
+  screenToWorld(sx, sy) {
+    return {
+      x: this.x + (sx - this.viewW / 2) / this.zoom,
+      y: this.y + (sy - this.viewH / 2) / this.zoom,
+    };
+  }
+
+  visible(x, y, margin) {
+    const b = this.viewBounds();
+    return x >= b.x0 - margin && x <= b.x1 + margin && y >= b.y0 - margin && y <= b.y1 + margin;
+  }
 }

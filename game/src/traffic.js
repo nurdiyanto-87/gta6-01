@@ -1,174 +1,208 @@
-// Solmar Heat — city traffic and parked cars.
-// Traffic cars cruise the road grid between intersections, brake for what is
-// ahead of them and honk when stuck. Parked cars line the kerbs: they are the
-// cars the player can steal. Both populations refill near the player.
+// San Cielo Heat — traffic: civilian cars that cruise the road grid in
+// their lanes, turn at intersections, brake for trouble ahead, and park
+// along the kerb waiting to be stolen.
 
-import { WORLD, ROAD_WIDTH, ROAD_CENTERS, TUNING, clamp, rand, randi, choice, dist, angleDiff } from './config.js';
-import { nearestIntersection, randomRoadPoint } from './city.js';
-import { makeCar, driveCar, damageCar, CAR_DEFS } from './vehicles.js';
-import { Effects } from './effects.js';
-import { AudioSys } from './audio.js';
+import { OCEAN_Y, ROAD_CENTERS, TUNING, WORLD } from './config.js';
+import { collideCircle, isOnRoad } from './city.js';
+import { clamp, makeRng } from './util.js';
+import { driveCar, makeVehicle, vehicleDef } from './vehicles.js';
 
-const TRAFFIC_DEFS = ['sedan', 'sedan', 'coupe', 'pickup', 'van', 'taxi', 'beater', 'muscle'];
+const CIVILIAN_TYPES = ['hatch', 'sedan', 'coupe', 'muscle', 'pickup', 'van', 'taxi', 'limo'];
+const LANE = 20; // lane offset from the road centre
 
-export function spawnTrafficCar(city, nearX, nearY) {
-  // Pick a road point near the player but off-screen when possible.
-  let p = randomRoadPoint();
-  for (let tries = 0; tries < 8; tries++) {
-    const cand = randomRoadPoint();
-    const d = dist(cand.x, cand.y, nearX, nearY);
-    if (d > 520 && d < 1100) { p = cand; break; }
-    p = cand;
+export class TrafficSystem {
+  constructor(city) {
+    this.city = city;
+    this.cars = []; // moving traffic
+    this.parked = []; // parked, stealable
+    this.rng = makeRng(777001);
   }
-  const vertical = Math.abs(p.x - nearestIntersection(p.x, p.y).x) < 4;
-  const angle = vertical ? (Math.random() < 0.5 ? Math.PI / 2 : -Math.PI / 2) : (Math.random() < 0.5 ? 0 : Math.PI);
-  const car = makeCar(choice(TRAFFIC_DEFS), p.x, p.y, angle, { driver: 'traffic' });
-  car.cruiseSpeed = rand(100, 145);
-  car.waypoint = pickNextIntersection(p.x, p.y, angle);
-  car.stuckTimer = 0;
-  return car;
-}
 
-export function spawnParkedCar(city, nearX, nearY) {
-  const vertical = Math.random() < 0.5;
-  const c = choice(ROAD_CENTERS);
-  const along = rand(150, WORLD - 350);
-  const side = Math.random() < 0.5 ? 1 : -1;
-  const off = side * (ROAD_WIDTH / 2 - 15);
-  const x = vertical ? c + off : along;
-  const y = vertical ? along : c + off;
-  const angle = vertical ? (side > 0 ? Math.PI / 2 : -Math.PI / 2) : (side > 0 ? 0 : Math.PI);
-  const car = makeCar(choice(TRAFFIC_DEFS), x, y, angle, { driver: 'parked' });
-  return car;
-}
-
-function pickNextIntersection(x, y, angle) {
-  const here = nearestIntersection(x, y);
-  const neighbours = [];
-  for (const cx of ROAD_CENTERS) {
-    if (Math.abs(cx - here.x) === 400 && Math.abs(here.y - y) < 400) neighbours.push({ x: cx, y: here.y });
+  spawnInitial() {
+    for (let i = 0; i < 26; i++) this.spawnTrafficCar(true);
+    for (let i = 0; i < 30; i++) this.spawnParkedCar();
   }
-  for (const cy of ROAD_CENTERS) {
-    if (Math.abs(cy - here.y) === 400 && Math.abs(here.x - x) < 400) neighbours.push({ x: here.x, y: cy });
+
+  randomRoadSpot() {
+    const vertical = this.rng.chance(0.5);
+    const c = this.rng.pick(ROAD_CENTERS);
+    const along = this.rng.range(80, WORLD - 80);
+    return vertical ? { x: c, y: along, vertical } : { x: along, y: c, vertical };
   }
-  // Also allow continuing straight past the intersection to the next one.
-  if (neighbours.length === 0) return { x: here.x, y: here.y };
-  return choice(neighbours);
-}
 
-export function updateTraffic(state, dt) {
-  const player = state.player;
-  const px = player.x, py = player.y;
+  spawnTrafficCar(anywhere) {
+    const spot = this.randomRoadSpot();
+    if (spot.y > OCEAN_Y - 60) return;
+    const dir = this.rng.chance(0.5) ? 1 : -1;
+    const type = this.rng.pick(CIVILIAN_TYPES);
+    const lane = dir > 0 ? LANE : -LANE;
+    const x = spot.vertical ? spot.x + lane : spot.x;
+    const y = spot.vertical ? spot.y : spot.y + lane;
+    const angle = spot.vertical ? (dir > 0 ? Math.PI / 2 : -Math.PI / 2) : (dir > 0 ? 0 : Math.PI);
+    const car = makeVehicle(type, x, y, angle, { driver: 'traffic' });
+    car.traffic = {
+      vertical: spot.vertical,
+      road: spot.vertical ? spot.x : spot.y,
+      dir,
+      speed: TUNING.trafficSpeed * this.rng.range(0.8, 1.1),
+      pause: 0,
+    };
+    car.speed = car.traffic.speed;
+    this.cars.push(car);
+  }
 
-  for (const car of state.cars) {
-    if (car.driver !== 'traffic') continue;
-    if (car.dead) continue;
-    const wp = car.waypoint;
-    const d = dist(car.x, car.y, wp.x, wp.y);
-    if (d < 30) {
-      car.waypoint = pickNextIntersection(car.x, car.y, car.angle);
-      continue;
+  spawnParkedCar() {
+    for (let tries = 0; tries < 20; tries++) {
+      const spot = this.randomRoadSpot();
+      if (spot.y > OCEAN_Y - 60) continue;
+      const side = this.rng.chance(0.5) ? 1 : -1;
+      const off = 30 * side;
+      const x = spot.vertical ? spot.x + off : spot.x;
+      const y = spot.vertical ? spot.y : spot.y + off;
+      if (!isOnRoad(this.city, x, y)) continue;
+      if (this.parked.some((p) => Math.hypot(p.x - x, p.y - y) < 90)) continue;
+      const angle = spot.vertical ? (side > 0 ? Math.PI / 2 : -Math.PI / 2) : (side > 0 ? 0 : Math.PI);
+      const type = this.rng.pick(CIVILIAN_TYPES);
+      const car = makeVehicle(type, x, y, angle, { driver: null });
+      this.parked.push(car);
+      return;
     }
-    // Steer toward the waypoint.
-    const want = Math.atan2(wp.y - car.y, wp.x - car.x);
-    const diff = angleDiff(car.angle, want);
-    const steer = clamp(diff * 2.2, -1, 1);
+  }
 
-    // Brake for obstacles ahead: cars and people.
-    const aheadX = car.x + Math.cos(car.angle) * 62;
-    const aheadY = car.y + Math.sin(car.angle) * 62;
-    let blocked = false;
-    for (const other of state.cars) {
-      if (other === car || other.dead) continue;
-      if (dist(aheadX, aheadY, other.x, other.y) < 34) { blocked = true; break; }
+  // A traffic car whose driver bails (stolen, wrecked) becomes an empty car.
+  removeTrafficCar(car) {
+    const i = this.cars.indexOf(car);
+    if (i >= 0) this.cars.splice(i, 1);
+  }
+
+  removeParkedCar(car) {
+    const i = this.parked.indexOf(car);
+    if (i >= 0) this.parked.splice(i, 1);
+  }
+
+  nearestStealable(x, y, radius) {
+    let best = null;
+    let bestD = radius;
+    const consider = (car) => {
+      if (car.wrecked) return;
+      const d = Math.hypot(car.x - x, car.y - y);
+      if (d < bestD) { bestD = d; best = car; }
+    };
+    for (const c of this.parked) consider(c);
+    for (const c of this.cars) {
+      if (Math.hypot(c.vx, c.vy) > 40) continue; // only slow traffic can be jacked
+      consider(c);
     }
-    if (!blocked) {
-      for (const ped of state.peds) {
-        if (ped.dead) continue;
-        if (dist(aheadX, aheadY, ped.x, ped.y) < 26) { blocked = true; break; }
+    return best;
+  }
+
+  update(dt, game) {
+    const player = game.player;
+    const px = player.x;
+    const py = player.y;
+
+    for (const car of this.cars) {
+      const t = car.traffic;
+      if (car.wrecked) {
+        driveCar(game, car, { throttle: 0, steer: 0 }, dt);
+        continue;
       }
-      if (!player.car && dist(aheadX, aheadY, px, py) < 26) blocked = true;
-    }
-    if (blocked) {
-      car.honkTimer -= dt;
-      if (car.honkTimer <= 0 && dist(car.x, car.y, px, py) < 500) {
-        car.honkTimer = rand(2, 4);
-        AudioSys.horn();
-      }
-    }
+      // Brake for the car ahead or a pedestrian in the way.
+      let want = t.speed;
+      const ahead = this.carAhead(car, 95);
+      if (ahead) want = Math.min(want, Math.max(0, ahead.speed - 20));
+      if (game.peds.pedAhead(car.x, car.y, car.angle, 70)) want = 0;
+      if (t.pause > 0) { t.pause -= dt; want = 0; }
 
-    const targetSpeed = blocked ? 0 : car.cruiseSpeed;
-    const throttle = car.speed < targetSpeed ? 1 : (car.speed > targetSpeed + 10 ? -0.6 : 0);
-    driveCar(car, { throttle, steer, handbrake: false }, dt, state.city, state);
-
-    // Stuck detection: pick a fresh route instead of grinding a wall.
-    if (Math.abs(car.speed) < 6 && throttle > 0) {
-      car.stuckTimer += dt;
-      if (car.stuckTimer > 3) {
-        car.stuckTimer = 0;
-        car.waypoint = pickNextIntersection(car.x + rand(-100, 100), car.y + rand(-100, 100), car.angle);
-      }
-    } else {
-      car.stuckTimer = 0;
-    }
-  }
-
-  // Keep the streets populated near the player; recycle far-away cars.
-  let trafficCount = 0, parkedCount = 0;
-  for (let i = state.cars.length - 1; i >= 0; i--) {
-    const car = state.cars[i];
-    if (car.driver === 'traffic') {
-      trafficCount++;
-      if (dist(car.x, car.y, px, py) > 1300 || car.dead) {
-        state.cars.splice(i, 1);
-        trafficCount--;
-      }
-    } else if (car.driver === 'parked') {
-      parkedCount++;
-      if (car.dead) { state.cars.splice(i, 1); parkedCount--; }
-    }
-  }
-  while (trafficCount < 20) {
-    state.cars.push(spawnTrafficCar(state.city, px, py));
-    trafficCount++;
-  }
-  state.parkedRespawn = (state.parkedRespawn || 0) - dt;
-  if (parkedCount < 14 && state.parkedRespawn <= 0) {
-    state.parkedRespawn = 4;
-    state.cars.push(spawnParkedCar(state.city, px, py));
-  }
-}
-
-// Gentle pairwise separation between cars, with damage on hard impacts.
-export function resolveCarCollisions(state) {
-  const cars = state.cars;
-  for (let i = 0; i < cars.length; i++) {
-    const a = cars[i];
-    if (a.dead) continue;
-    for (let j = i + 1; j < cars.length; j++) {
-      const b = cars[j];
-      if (b.dead) continue;
-      const dx = b.x - a.x, dy = b.y - a.y;
-      const rr = (a.def.length + b.def.length) / 2 - 14;
-      const d2 = dx * dx + dy * dy;
-      if (d2 >= rr * rr || d2 < 0.01) continue;
-      const d = Math.sqrt(d2);
-      const push = (rr - d) / 2;
-      const nx = dx / d, ny = dy / d;
-      a.x -= nx * push; a.y -= ny * push;
-      b.x += nx * push; b.y += ny * push;
-      const closing = Math.abs(a.speed - b.speed);
-      if (closing > 110) {
-        const midX = (a.x + b.x) / 2, midY = (a.y + b.y) / 2;
-        Effects.sparks(midX, midY);
-        damageCar(a, closing / 40, state);
-        damageCar(b, closing / 40, state);
-        if (state.player.car === a || state.player.car === b) {
-          AudioSys.crash(closing / 400);
-          Effects.addShake(5);
+      // Steer back onto the lane centre and turn at intersections.
+      const lanePos = t.vertical ? car.x : car.y;
+      const laneTarget = t.road + (t.dir > 0 ? LANE : -LANE);
+      const laneErr = laneTarget - lanePos;
+      const wantAngle = t.vertical ? (t.dir > 0 ? Math.PI / 2 : -Math.PI / 2) : (t.dir > 0 ? 0 : Math.PI);
+      let steer = clamp(laneErr * 0.02, -1, 1) * 0.6;
+      // Near an intersection, sometimes pick a new road. Remember the
+      // crossing so the same car does not re-decide every frame.
+      const along = t.vertical ? car.y : car.x;
+      const cross = nearestCrossing(along);
+      if (t.lastCross && Math.hypot(car.x - t.lastCross.x, car.y - t.lastCross.y) > 90) t.lastCross = null;
+      if (Math.abs(along - cross) < 26 && !t.lastCross) {
+        t.lastCross = { x: car.x, y: car.y };
+        if (this.rng.chance(0.35)) {
+          t.vertical = !t.vertical;
+          t.road = cross;
+          t.dir = this.rng.chance(0.5) ? 1 : -1;
         }
-        a.speed *= 0.6; b.speed *= 0.6;
+      }
+
+      const angleErr = angleDelta(car.angle, wantAngle);
+      steer += clamp(angleErr * 1.6, -1, 1);
+      const throttle = car.speed < want ? 1 : car.speed > want + 8 ? -0.6 : 0;
+      driveCar(game, car, { throttle, steer: clamp(steer, -1, 1) }, dt);
+
+      // Despawn far away, respawn near the player to keep streets alive.
+      if (Math.hypot(car.x - px, car.y - py) > 1400) {
+        this.respawnNear(car, px, py);
+      }
+    }
+
+    // Keep the traffic count steady.
+    while (this.cars.length < 24) this.spawnTrafficCar(false);
+  }
+
+  carAhead(car, range) {
+    let best = null;
+    let bestD = range;
+    const fx = Math.cos(car.angle);
+    const fy = Math.sin(car.angle);
+    const check = (other) => {
+      if (other === car || other.wrecked) return;
+      const dx = other.x - car.x;
+      const dy = other.y - car.y;
+      const forward = dx * fx + dy * fy;
+      const side = Math.abs(-dx * fy + dy * fx);
+      if (forward > 0 && forward < bestD && side < 26) { bestD = forward; best = other; }
+    };
+    for (const c of this.cars) check(c);
+    for (const c of this.parked) check(c);
+    return best;
+  }
+
+  respawnNear(car, px, py) {
+    for (let tries = 0; tries < 12; tries++) {
+      const spot = this.randomRoadSpot();
+      const d = Math.hypot(spot.x - px, spot.y - py);
+      if (d > 700 && d < 1200 && spot.y < OCEAN_Y - 60) {
+        const t = car.traffic;
+        const lane = t.dir > 0 ? LANE : -LANE;
+        car.x = spot.vertical ? spot.x + lane : spot.x;
+        car.y = spot.vertical ? spot.y : spot.y + lane;
+        t.vertical = spot.vertical;
+        t.road = spot.vertical ? spot.x : spot.y;
+        car.angle = t.vertical ? (t.dir > 0 ? Math.PI / 2 : -Math.PI / 2) : (t.dir > 0 ? 0 : Math.PI);
+        car.vx = 0;
+        car.vy = 0;
+        car.speed = t.speed;
+        car.health = car.maxHealth;
+        car.wrecked = false;
+        return;
       }
     }
   }
+}
+
+function nearestCrossing(along) {
+  let best = ROAD_CENTERS[0];
+  let bestD = Math.abs(along - best);
+  for (const c of ROAD_CENTERS) {
+    const d = Math.abs(along - c);
+    if (d < bestD) { bestD = d; best = c; }
+  }
+  return best;
+}
+
+function angleDelta(from, to) {
+  let d = to - from;
+  while (d > Math.PI) d -= Math.PI * 2;
+  while (d < -Math.PI) d += Math.PI * 2;
+  return d;
 }

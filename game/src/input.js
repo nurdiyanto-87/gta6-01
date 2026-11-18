@@ -1,77 +1,70 @@
-// Solmar Heat — keyboard and mouse input.
-// One object owns every key and button; the game asks it questions each frame
-// instead of listening to events all over the place.
+// San Cielo Heat — keyboard and mouse. The game reads this, never the
+// DOM directly, so play-tests and screenshots can drive the same input.
 
-export const Input = {
-  down: new Set(), // codes currently held
-  pressed: new Set(), // codes pressed since the last frame
-  mouseX: 0,
-  mouseY: 0, // mouse in canvas pixels
-  mouseDown: false,
-  mousePressed: false, // left button pressed since the last frame
-  mouseReleased: false,
-  wheel: 0,
+export class Input {
+  constructor(canvas) {
+    this.keys = new Set();
+    this.pressed = new Set(); // keys pressed since the last poll
+    this.mouse = { x: 0, y: 0, down: false, clicked: false, rightDown: false };
+    this.canvas = canvas;
+    this.anyKey = false;
 
-  init(canvas) {
-    const prevent = new Set([
-      'Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Tab',
-    ]);
     window.addEventListener('keydown', (e) => {
-      if (prevent.has(e.code)) e.preventDefault();
-      if (!e.repeat) {
-        this.down.add(e.code);
-        this.pressed.add(e.code);
-      }
+      if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) e.preventDefault();
+      if (!this.keys.has(e.code)) this.pressed.add(e.code);
+      this.keys.add(e.code);
+      this.anyKey = true;
     });
-    window.addEventListener('keyup', (e) => this.down.delete(e.code));
+    window.addEventListener('keyup', (e) => {
+      this.keys.delete(e.code);
+    });
     window.addEventListener('blur', () => {
-      this.down.clear();
-      this.mouseDown = false;
+      this.keys.clear();
+      this.mouse.down = false;
     });
     canvas.addEventListener('mousemove', (e) => {
       const r = canvas.getBoundingClientRect();
-      this.mouseX = (e.clientX - r.left) * (canvas.width / r.width);
-      this.mouseY = (e.clientY - r.top) * (canvas.height / r.height);
+      this.mouse.x = (e.clientX - r.left) * (canvas.width / r.width);
+      this.mouse.y = (e.clientY - r.top) * (canvas.height / r.height);
     });
     canvas.addEventListener('mousedown', (e) => {
-      if (e.button === 0) {
-        this.mouseDown = true;
-        this.mousePressed = true;
-      }
+      if (e.button === 0) { this.mouse.down = true; this.mouse.clicked = true; }
+      if (e.button === 2) this.mouse.rightDown = true;
+      this.anyKey = true;
     });
     window.addEventListener('mouseup', (e) => {
-      if (e.button === 0) {
-        this.mouseDown = false;
-        this.mouseReleased = true;
-      }
+      if (e.button === 0) this.mouse.down = false;
+      if (e.button === 2) this.mouse.rightDown = false;
     });
-    canvas.addEventListener('wheel', (e) => {
-      e.preventDefault();
-      this.wheel += Math.sign(e.deltaY);
-    }, { passive: false });
     canvas.addEventListener('contextmenu', (e) => e.preventDefault());
-  },
+  }
 
-  // Call once at the end of each frame to clear the edge-triggered sets.
+  down(code) {
+    return this.keys.has(code);
+  }
+
+  // True once, on the frame the key went down.
+  wasPressed(code) {
+    return this.pressed.has(code);
+  }
+
+  axis(neg, pos) {
+    return (this.down(pos) ? 1 : 0) - (this.down(neg) ? 1 : 0);
+  }
+
+  // WASD / arrows as a normalised movement vector.
+  moveVector() {
+    let x = this.axis('KeyA', 'KeyD') + this.axis('ArrowLeft', 'ArrowRight');
+    let y = this.axis('KeyW', 'KeyS') + this.axis('ArrowUp', 'ArrowDown');
+    x = Math.max(-1, Math.min(1, x));
+    y = Math.max(-1, Math.min(1, y));
+    const len = Math.hypot(x, y);
+    if (len > 1) { x /= len; y /= len; }
+    return { x, y };
+  }
+
   endFrame() {
     this.pressed.clear();
-    this.mousePressed = false;
-    this.mouseReleased = false;
-    this.wheel = 0;
-  },
-
-  isDown(code) { return this.down.has(code); },
-  wasPressed(code) { return this.pressed.has(code); },
-  anyPressed(codes) { return codes.some((c) => this.pressed.has(c)); },
-
-  // WASD / arrows as a normalised -1..1 movement vector.
-  moveVector() {
-    let x = 0, y = 0;
-    if (this.isDown('KeyA') || this.isDown('ArrowLeft')) x -= 1;
-    if (this.isDown('KeyD') || this.isDown('ArrowRight')) x += 1;
-    if (this.isDown('KeyW') || this.isDown('ArrowUp')) y -= 1;
-    if (this.isDown('KeyS') || this.isDown('ArrowDown')) y += 1;
-    if (x !== 0 && y !== 0) { x *= 0.7071; y *= 0.7071; }
-    return { x, y };
-  },
-};
+    this.mouse.clicked = false;
+  }
+}

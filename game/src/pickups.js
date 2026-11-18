@@ -1,132 +1,127 @@
-// Solmar Heat — pickups: health, armour, ammo and hidden cash stashes.
-// Fixed spots around the city refill over time, so exploring always pays.
-// Cash stashes are the collectibles: ten briefcases tucked into alleys,
-// rooftops of huts and the far corners of the map.
+// San Cielo Heat — pickups: health kits, armour vests, ammo, cash and
+// the odd SMG crate, scattered where a driver in trouble looks for them.
 
-import { dist, randi } from './config.js';
-import { Effects } from './effects.js';
-import { AudioSys } from './audio.js';
-import { healPlayer, giveAmmo } from './player.js';
+import { PLACES } from './config.js';
+import { dist } from './util.js';
 
-const SPOTS = [
-  { kind: 'health', x: 1050, y: 1450 },
-  { kind: 'health', x: 2450, y: 1050 },
-  { kind: 'health', x: 1850, y: 2650 },
-  { kind: 'armor', x: 1450, y: 650 },
-  { kind: 'armor', x: 2650, y: 1850 },
-  { kind: 'ammo', x: 650, y: 2250, weapon: 'smg', amount: 60 },
-  { kind: 'ammo', x: 2250, y: 450, weapon: 'shotgun', amount: 12 },
-  { kind: 'ammo', x: 350, y: 2850, weapon: 'smg', amount: 60 },
-  { kind: 'stash', x: 300, y: 250, amount: 250 },
-  { kind: 'stash', x: 2900, y: 300, amount: 250 },
-  { kind: 'stash', x: 300, y: 2540, amount: 250 },
-  { kind: 'stash', x: 2880, y: 2500, amount: 250 },
-  { kind: 'stash', x: 1600, y: 3040, amount: 250 },
-  { kind: 'stash', x: 1350, y: 1350, amount: 250 },
-  { kind: 'stash', x: 2300, y: 1350, amount: 250 },
-  { kind: 'stash', x: 900, y: 900, amount: 250 },
-  { kind: 'stash', x: 2050, y: 2120, amount: 250 },
-  { kind: 'stash', x: 380, y: 1730, amount: 250 },
-];
+const KINDS = {
+  health: { label: 'Health +40', color: '#4ecb5a', icon: '+' },
+  armor: { label: 'Armour +50', color: '#4b8ad9', icon: 'A' },
+  ammo_pistol: { label: 'Pistol ammo +24', color: '#e0a83c', icon: 'P' },
+  ammo_smg: { label: 'SMG ammo +60', color: '#e0a83c', icon: 'S' },
+  weapon_smg: { label: 'SMG acquired!', color: '#e87a3c', icon: 'W' },
+  cash: { label: 'Cash', color: '#7ddb6a', icon: '$' },
+  briefcase: { label: 'Briefcase', color: '#c9a24b', icon: 'B' },
+};
 
-export function spawnWorldPickups(state) {
-  state.pickups.length = 0;
-  for (const s of SPOTS) {
-    state.pickups.push({ ...s, timer: 0, taken: false, bob: Math.random() * Math.PI * 2 });
+export class PickupSystem {
+  constructor() {
+    this.pickups = [];
   }
-}
 
-export function updatePickups(state, dt) {
-  const p = state.player;
-  const px = p.car ? p.car.x : p.x, py = p.car ? p.car.y : p.y;
-  for (let i = state.pickups.length - 1; i >= 0; i--) {
-    const pk = state.pickups[i];
-    pk.bob += dt * 3;
-    // Enemy drops expire.
-    if (pk.expires !== undefined && !pk.taken) {
-      pk.expires -= dt;
-      if (pk.expires <= 0) { state.pickups.splice(i, 1); continue; }
+  spawnInitial() {
+    const spots = [
+      { x: PLACES.hospital.x + 60, y: PLACES.hospital.y, kind: 'health' },
+      { x: PLACES.hospital.x - 60, y: PLACES.hospital.y + 40, kind: 'health' },
+      { x: PLACES.policeHQ.x + 70, y: PLACES.policeHQ.y, kind: 'armor' },
+      { x: PLACES.garage.x + 60, y: PLACES.garage.y + 30, kind: 'ammo_pistol' },
+      { x: PLACES.depot.x - 60, y: PLACES.depot.y, kind: 'weapon_smg' },
+      { x: PLACES.bazaar.x, y: PLACES.bazaar.y + 80, kind: 'ammo_smg' },
+      { x: PLACES.arena.x + 90, y: PLACES.arena.y, kind: 'health' },
+      { x: PLACES.marina.x - 80, y: PLACES.marina.y - 120, kind: 'armor' },
+      { x: 580, y: 2580, kind: 'ammo_pistol' },
+      { x: 2580, y: 2580, kind: 'cash', amount: 60 },
+      { x: 980, y: 1780, kind: 'health' },
+      { x: 2180, y: 980, kind: 'ammo_smg' },
+    ];
+    for (const s of spots) this.add(s.x, s.y, s.kind, s.amount || 0, true);
+  }
+
+  add(x, y, kind, amount, respawns) {
+    const p = {
+      x, y, kind,
+      amount: amount || 0,
+      respawns: !!respawns,
+      active: true,
+      respawnTimer: 0,
+      bob: Math.random() * Math.PI * 2,
+    };
+    this.pickups.push(p);
+    return p;
+  }
+
+  dropCash(x, y, amount) {
+    if (amount > 0) this.add(x, y, 'cash', amount, false);
+  }
+
+  dropBriefcase(x, y) {
+    return this.add(x, y, 'briefcase', 0, false);
+  }
+
+  update(dt, game) {
+    const player = game.player;
+    for (const p of this.pickups) {
+      p.bob += dt * 3;
+      if (!p.active) {
+        if (p.respawns) {
+          p.respawnTimer -= dt;
+          if (p.respawnTimer <= 0) p.active = true;
+        }
+        continue;
+      }
+      if (player.dead) continue;
+      const d = dist(p.x, p.y, player.x, player.y);
+      const reach = player.inCar ? 34 : 30;
+      if (d < reach) this.collect(game, p);
     }
-    if (pk.taken) {
-      // Stashes never come back; the rest refill after 45 seconds.
-      if (pk.kind === 'stash') continue;
-      pk.timer -= dt;
-      if (pk.timer <= 0) pk.taken = false;
-      continue;
+    // Sweep spent one-shot pickups.
+    for (let i = this.pickups.length - 1; i >= 0; i--) {
+      const p = this.pickups[i];
+      if (!p.active && !p.respawns) this.pickups.splice(i, 1);
     }
-    if (dist(px, py, pk.x, pk.y) <= 34) collectPickup(state, pk);
+  }
+
+  collect(game, p) {
+    const player = game.player;
+    const kind = KINDS[p.kind];
+    let ok = true;
+    if (p.kind === 'health') {
+      if (player.health >= 100) ok = false;
+      else player.heal(40);
+    } else if (p.kind === 'armor') {
+      if (player.armor >= 100) ok = false;
+      else player.giveArmor(50);
+    } else if (p.kind === 'ammo_pistol') {
+      player.giveAmmo('pistol', 24);
+    } else if (p.kind === 'ammo_smg') {
+      player.giveAmmo('smg', 60);
+    } else if (p.kind === 'weapon_smg') {
+      player.giveWeapon('smg', 90);
+      player.weapon = 'smg';
+    } else if (p.kind === 'cash') {
+      const amount = p.amount || 25;
+      player.money += amount;
+      game.effects.floater(p.x, p.y - 20, '+$' + amount, '#7ddb6a');
+      game.audio.cash();
+    } else if (p.kind === 'briefcase') {
+      game.missions.onBriefcaseTaken(p);
+    }
+    if (!ok) return;
+    p.active = false;
+    p.respawnTimer = 22;
+    if (p.kind !== 'cash') {
+      game.addMessage(kind.label);
+      game.audio.pickup();
+    }
+    game.effects.burst(p.x, p.y, 10, { speed: 70, life: 0.4, size: 3, color: kind.color });
+  }
+
+  reset() {
+    this.pickups = [];
+    this.spawnInitial();
   }
 }
 
-function collectPickup(state, pk) {
-  const p = state.player;
-  pk.taken = true;
-  pk.timer = 45;
-  if (pk.kind === 'health') {
-    healPlayer(p, 50);
-    state.hud.message('Health +50', '#7fd4c1');
-    Effects.floatText(pk.x, pk.y - 20, '+50 HP', '#7fd4c1');
-  } else if (pk.kind === 'armor') {
-    p.armor = Math.min(p.maxArmor, p.armor + 50);
-    state.hud.message('Armour +50', '#8ab8ff');
-    Effects.floatText(pk.x, pk.y - 20, '+50 ARMOUR', '#8ab8ff');
-  } else if (pk.kind === 'ammo') {
-    giveAmmo(p, pk.weapon, pk.amount);
-    state.hud.message('Ammo for the ' + pk.weapon.toUpperCase(), '#ffd76a');
-  } else if (pk.kind === 'stash' || pk.kind === 'cash') {
-    p.money += pk.amount;
-    state.stats.moneyEarned += pk.amount;
-    if (pk.kind === 'stash') state.stats.stashes++;
-    state.hud.message('+$' + pk.amount, '#7fd4c1');
-    Effects.floatText(pk.x, pk.y - 20, '+$' + pk.amount, '#7fd4c1');
-    AudioSys.cash();
-  }
-  Effects.confetti(pk.x, pk.y);
-  AudioSys.pickup();
-  // One-shot drops vanish once collected; world pickups respawn via timer.
-  if (pk.expires !== undefined) {
-    const idx = state.pickups.indexOf(pk);
-    if (idx >= 0) state.pickups.splice(idx, 1);
-  }
-}
-
-export function drawPickup(ctx, pk, time) {
-  if (pk.taken) return;
-  const bob = Math.sin(pk.bob) * 3;
-  const x = pk.x, y = pk.y + bob;
-  ctx.save();
-  ctx.translate(x, y);
-  // Glow ring.
-  ctx.fillStyle = 'rgba(255,215,106,0.18)';
-  ctx.beginPath(); ctx.arc(0, 0, 20, 0, Math.PI * 2); ctx.fill();
-  ctx.fillStyle = 'rgba(0,0,0,0.25)';
-  ctx.beginPath(); ctx.ellipse(2, 8, 12, 5, 0, 0, Math.PI * 2); ctx.fill();
-  if (pk.kind === 'health') {
-    ctx.fillStyle = '#f2f2f2';
-    ctx.fillRect(-10, -10, 20, 20);
-    ctx.fillStyle = '#3fae6a';
-    ctx.fillRect(-3, -8, 6, 16);
-    ctx.fillRect(-8, -3, 16, 6);
-  } else if (pk.kind === 'armor') {
-    ctx.fillStyle = '#3d6b8a';
-    ctx.beginPath();
-    ctx.moveTo(0, -11); ctx.lineTo(10, -6); ctx.lineTo(8, 8); ctx.lineTo(0, 12); ctx.lineTo(-8, 8); ctx.lineTo(-10, -6);
-    ctx.closePath(); ctx.fill();
-    ctx.fillStyle = '#8ab8ff';
-    ctx.fillRect(-2, -6, 4, 10);
-  } else if (pk.kind === 'ammo') {
-    ctx.fillStyle = '#c8a848';
-    for (let i = -1; i <= 1; i++) ctx.fillRect(i * 7 - 2, -8, 5, 16);
-    ctx.fillStyle = '#8a6a44';
-    ctx.fillRect(-10, 6, 20, 4);
-  } else {
-    // Briefcase full of cash.
-    ctx.fillStyle = '#6a4e2e';
-    ctx.fillRect(-12, -8, 24, 16);
-    ctx.fillStyle = '#8a6a44';
-    ctx.fillRect(-12, -8, 24, 5);
-    ctx.fillStyle = '#ffd76a';
-    ctx.fillRect(-3, -3, 6, 4);
-  }
-  ctx.restore();
+export function pickupKindInfo(kind) {
+  return KINDS[kind];
 }

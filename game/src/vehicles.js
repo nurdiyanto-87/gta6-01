@@ -1,147 +1,205 @@
-// Solmar Heat — vehicles: definitions and arcade driving physics.
-// Every car in the city, from a rusty pickup to a police interceptor, is one
-// of these definitions plus a physics state. The player drives with the same
-// model the traffic uses, so chases feel fair.
+// San Cielo Heat — the cars: nine civilian types plus the police fleet,
+// and the arcade driving model every car shares.
 
-import { TUNING, clamp, rand, choice } from './config.js';
-import { collideCircle } from './city.js';
-import { Effects } from './effects.js';
-import { AudioSys } from './audio.js';
+import { TUNING } from './config.js';
+import { collideCar } from './city.js';
+import { clamp } from './util.js';
 
-export const CAR_DEFS = {
-  sedan: { name: 'Solmar Sedan', length: 46, width: 22, topSpeed: 300, accel: 300, turn: 2.6, seats: 4, price: 0 },
-  coupe: { name: 'Vela Coupe', length: 44, width: 21, topSpeed: 340, accel: 350, turn: 2.9, seats: 2, price: 0 },
-  pickup: { name: 'Rancho Pickup', length: 50, width: 23, topSpeed: 270, accel: 260, turn: 2.3, seats: 3, price: 0 },
-  van: { name: 'Cargo Van', length: 52, width: 24, topSpeed: 250, accel: 230, turn: 2.1, seats: 3, price: 0 },
-  taxi: { name: 'Solmar Taxi', length: 46, width: 22, topSpeed: 300, accel: 300, turn: 2.6, seats: 4, price: 0 },
-  sports: { name: 'Falcon GT', length: 45, width: 21, topSpeed: 430, accel: 430, turn: 3.3, seats: 2, price: 0 },
-  muscle: { name: 'Bravo Muscle', length: 48, width: 23, topSpeed: 370, accel: 390, turn: 2.7, seats: 2, price: 0 },
-  police: { name: 'Interceptor', length: 47, width: 22, topSpeed: 400, accel: 400, turn: 3.1, seats: 4, police: true, price: 0 },
-  beater: { name: 'Rusty Beater', length: 44, width: 21, topSpeed: 230, accel: 210, turn: 2.2, seats: 4, price: 0 },
-};
-
-export const CAR_COLORS = [
-  '#c8452c', '#2c6ec8', '#e8c53d', '#3fae6a', '#e8e8e8', '#3a3a42',
-  '#8a4fb8', '#e87f3d', '#4fb8c8', '#b8c83d', '#d8d8d8', '#7a4a2c',
+export const VEHICLE_TYPES = [
+  { id: 'hatch', name: 'Cielo Hatch', kind: 'hatch', length: 44, width: 22, accel: 300, maxSpeed: 250, grip: 3.6, steer: 2.8, health: 80, colors: ['#d95f4b', '#4b8ad9', '#e8e3d3', '#5da56a'] },
+  { id: 'sedan', name: 'Marlin Sedan', kind: 'sedan', length: 50, width: 23, accel: 320, maxSpeed: 275, grip: 3.4, steer: 2.6, health: 100, colors: ['#3a4a5a', '#c9c2b4', '#7a4a8a', '#e0e0e0'] },
+  { id: 'coupe', name: 'Sol Coupe', kind: 'coupe', length: 48, width: 22, accel: 360, maxSpeed: 305, grip: 3.8, steer: 3.0, health: 85, colors: ['#e0a83c', '#c93a4b', '#2e86a3', '#f2f2ee'] },
+  { id: 'muscle', name: 'Bravo Muscle', kind: 'muscle', length: 52, width: 24, accel: 420, maxSpeed: 320, grip: 2.9, steer: 2.4, health: 110, colors: ['#8a2f2f', '#2b2b30', '#d97b2e', '#4a6b3a'] },
+  { id: 'sports', name: 'Veloce GT', kind: 'sports', length: 50, width: 23, accel: 480, maxSpeed: 380, grip: 4.4, steer: 3.3, health: 90, colors: ['#f2c14e', '#d93a2b', '#1e88c8', '#e8e3d3'] },
+  { id: 'pickup', name: 'Rancho Pickup', kind: 'pickup', length: 54, width: 24, accel: 300, maxSpeed: 260, grip: 3.2, steer: 2.4, health: 130, colors: ['#6b7a5a', '#a85a24', '#c9c2b4', '#3a4a5a'] },
+  { id: 'van', name: 'Cargo Van', kind: 'van', length: 56, width: 25, accel: 260, maxSpeed: 235, grip: 3.0, steer: 2.2, health: 140, colors: ['#e8e3d3', '#4b8ad9', '#8a8a8a', '#c9a24b'] },
+  { id: 'taxi', name: 'City Cab', kind: 'sedan', length: 50, width: 23, accel: 320, maxSpeed: 275, grip: 3.4, steer: 2.6, health: 100, colors: ['#f5c81e'], taxi: true },
+  { id: 'limo', name: 'Regal Limo', kind: 'limo', length: 66, width: 24, accel: 270, maxSpeed: 255, grip: 3.0, steer: 2.1, health: 130, colors: ['#1c1c20', '#e8e3d3'] },
+  { id: 'cruiser', name: 'SCPD Cruiser', kind: 'sedan', length: 50, width: 23, accel: 400, maxSpeed: 345, grip: 4.0, steer: 3.0, health: 150, colors: ['#1c1c20'], police: true },
+  { id: 'interceptor', name: 'SCPD Interceptor', kind: 'sports', length: 50, width: 23, accel: 470, maxSpeed: 375, grip: 4.5, steer: 3.3, health: 150, colors: ['#1c1c20'], police: true },
 ];
 
-export function makeCar(defId, x, y, angle, opts) {
-  const def = CAR_DEFS[defId];
+export function vehicleDef(id) {
+  return VEHICLE_TYPES.find((v) => v.id === id) || VEHICLE_TYPES[1];
+}
+
+let nextCarId = 1;
+
+export function makeVehicle(typeId, x, y, angle, opts) {
+  const o = opts || {};
+  const def = vehicleDef(typeId);
   return {
-    defId, def, x, y, angle: angle || 0,
-    speed: 0, steer: 0,
-    color: (opts && opts.color) || choice(CAR_COLORS),
-    health: 100, maxHealth: 100,
-    driver: (opts && opts.driver) || 'parked', // parked | traffic | player | police | none
-    id: Math.floor(Math.random() * 1e9),
+    id: nextCarId++,
+    type: typeId,
+    def,
+    x, y, angle,
+    vx: 0, vy: 0,
+    speed: 0,
+    steer: 0,
+    color: o.color || def.colors[Math.floor(Math.random() * def.colors.length)],
+    health: def.health,
+    maxHealth: def.health,
+    wrecked: false,
+    driver: o.driver || null, // 'player' | 'traffic' | 'police' | null (parked)
+    siren: false,
     smokeTimer: 0,
-    dead: false,
-    locked: false,
-    siren: def.police || false,
-    waypoint: null,
-    cruiseSpeed: 0,
-    brakeLight: false,
-    honkTimer: 0,
+    skidTimer: 0,
+    lastHitAt: -99,
   };
 }
 
-// Arcade car physics: accelerate along the heading, steer harder at low
-// speed, slide with the handbrake. Collisions use two circles (nose/tail).
-export function driveCar(car, input, dt, city, state) {
+// Arcade driving: speed along the heading, velocity eased toward it so
+// handbrake turns slide. Returns impact info for effects and sound.
+export function driveCar(game, car, input, dt) {
   const def = car.def;
-  const forward = input.throttle; // -1..1
-  const steering = input.steer; // -1..1
-  const handbrake = input.handbrake;
+  if (car.wrecked) {
+    car.vx *= Math.exp(-2 * dt);
+    car.vy *= Math.exp(-2 * dt);
+    car.x += car.vx * dt;
+    car.y += car.vy * dt;
+    car.speed = 0;
+    return { crashed: false, impact: 0 };
+  }
 
-  if (forward > 0) car.speed += def.accel * forward * dt;
-  else if (forward < 0) {
+  const throttle = clamp(input.throttle || 0, -1, 1);
+  const steerInput = clamp(input.steer || 0, -1, 1);
+  const handbrake = !!input.handbrake;
+
+  if (throttle > 0) car.speed += def.accel * throttle * dt;
+  else if (throttle < 0) {
     if (car.speed > 20) car.speed -= TUNING.carBrake * dt; // braking
-    else car.speed += def.accel * 0.55 * forward * dt; // reverse
+    else car.speed += def.accel * 0.6 * throttle * dt; // reversing
   }
   // Drag and rolling resistance.
   car.speed -= car.speed * TUNING.carDrag * dt;
-  if (Math.abs(car.speed) < 4 && forward === 0) car.speed = 0;
-  car.speed = clamp(car.speed, -TUNING.carReverseMax, def.topSpeed);
+  if (Math.abs(car.speed) < 4 && throttle === 0) car.speed = 0;
+  car.speed = clamp(car.speed, -TUNING.carReverseMax, def.maxSpeed);
 
-  // Steering: sharper when slow, looser at speed; handbrake loosens the rear.
-  const speedNorm = Math.min(1, Math.abs(car.speed) / def.topSpeed);
-  const steerAuthority = def.turn * (1 - speedNorm * 0.55) * (handbrake ? 1.5 : 1);
-  car.steer += (steering - car.steer) * Math.min(1, dt * 8);
-  const dir = car.speed >= 0 ? 1 : -1;
-  car.angle += car.steer * steerAuthority * (Math.abs(car.speed) / 160) * dt * dir;
+  // Steering: sharper at moderate speed, numb when crawling or sliding.
+  const speedFactor = clamp(Math.abs(car.speed) / 120, 0, 1);
+  const steerRate = def.steer * speedFactor * (handbrake ? 1.35 : 1);
+  car.steer += (steerInput - car.steer) * Math.min(1, dt * 8);
+  car.angle += car.steer * steerRate * dt * (car.speed >= 0 ? 1 : -1);
 
-  const nx = car.x + Math.cos(car.angle) * car.speed * dt;
-  const ny = car.y + Math.sin(car.angle) * car.speed * dt;
+  const grip = handbrake ? TUNING.handbrakeGrip : def.grip;
+  const wantVx = Math.cos(car.angle) * car.speed;
+  const wantVy = Math.sin(car.angle) * car.speed;
+  const k = 1 - Math.exp(-grip * dt);
+  car.vx += (wantVx - car.vx) * k;
+  car.vy += (wantVy - car.vy) * k;
 
-  // Two collision circles: nose and tail.
-  const half = def.length / 2 - 8;
-  const nose = { x: nx + Math.cos(car.angle) * half, y: ny + Math.sin(car.angle) * half, radius: def.width / 2 };
-  const tail = { x: nx - Math.cos(car.angle) * half, y: ny - Math.sin(car.angle) * half, radius: def.width / 2 };
-  const hitNose = collideCircle(city, nose);
-  const hitTail = collideCircle(city, tail);
-  if (hitNose || hitTail) {
-    const impact = Math.abs(car.speed);
-    if (impact > 90) {
-      const dmg = (impact - 90) / 22;
-      damageCar(car, dmg, state);
-      Effects.sparks(car.x + Math.cos(car.angle) * half, car.y + Math.sin(car.angle) * half);
-      Effects.addShake(Math.min(8, impact / 60));
-      if (state && state.player && state.player.car === car) AudioSys.crash(impact / 400);
+  const prevX = car.x;
+  const prevY = car.y;
+  car.x += car.vx * dt;
+  car.y += car.vy * dt;
+
+  // Skid marks while sliding hard.
+  const slide = Math.abs(car.vx * Math.sin(car.angle) - car.vy * Math.cos(car.angle));
+  if ((handbrake || slide > 60) && Math.hypot(car.vx, car.vy) > 120) {
+    car.skidTimer -= dt;
+    if (car.skidTimer <= 0) {
+      car.skidTimer = 0.03;
+      game.effects.addSkid(car.x - Math.cos(car.angle) * def.length * 0.35, car.y - Math.sin(car.angle) * def.length * 0.35, car.angle);
     }
-    // Recompute the centre from the pushed circles and kill some speed.
-    car.x = (nose.x + tail.x) / 2;
-    car.y = (nose.y + tail.y) / 2;
-    car.speed *= 0.45;
-  } else {
-    car.x = nx;
-    car.y = ny;
   }
 
-  // Handbrake slides leave skid marks and smoke.
-  if (handbrake && Math.abs(car.speed) > 120) {
-    Effects.addSkid(car.x - Math.cos(car.angle) * half, car.y - Math.sin(car.angle) * half, car.angle);
-    if (Math.random() < 0.5) Effects.smoke(car.x - Math.cos(car.angle) * half, car.y - Math.sin(car.angle) * half, false);
+  const crashed = collideCar(game.city, car, def.length / 2, def.width / 2);
+  let impact = 0;
+  if (crashed) {
+    const moved = Math.hypot(car.x - prevX, car.y - prevY);
+    const expected = Math.hypot(car.vx, car.vy) * dt;
+    impact = Math.max(0, expected - moved) / Math.max(dt, 0.001);
+    if (impact > 40) {
+      const dmg = impact * 0.06;
+      damageCar(game, car, dmg);
+      game.effects.sparks(car.x + Math.cos(car.angle) * def.length * 0.4, car.y + Math.sin(car.angle) * def.length * 0.4);
+      game.audio.crash(impact > 160);
+      if (car.driver === 'player') game.camera.addShake(Math.min(10, impact * 0.05));
+      car.speed *= 0.35;
+      car.vx *= 0.3;
+      car.vy *= 0.3;
+    } else {
+      car.speed *= 0.7;
+    }
   }
-  // Damaged cars smoke.
-  if (car.health < 45) {
+
+  // Smoke from a dying engine.
+  if (car.health < car.maxHealth * 0.35 && !car.wrecked) {
     car.smokeTimer -= dt;
     if (car.smokeTimer <= 0) {
-      car.smokeTimer = car.health < 25 ? 0.08 : 0.2;
-      Effects.smoke(car.x + Math.cos(car.angle) * half, car.y + Math.sin(car.angle) * half, car.health < 25);
+      car.smokeTimer = 0.12;
+      game.effects.smoke(car.x + Math.cos(car.angle) * car.def.length * 0.4, car.y + Math.sin(car.angle) * car.def.length * 0.4, car.health < car.maxHealth * 0.18);
     }
   }
-  car.brakeLight = forward < 0 && car.speed > 20;
+  return { crashed, impact };
 }
 
-export function damageCar(car, amount, state) {
-  if (car.dead) return;
+export function damageCar(game, car, amount) {
+  if (car.wrecked) return;
   car.health -= amount;
   if (car.health <= 0) {
     car.health = 0;
-    car.dead = true;
+    car.wrecked = true;
     car.speed = 0;
-    Effects.explosion(car.x, car.y);
-    AudioSys.explosion();
-    if (state && state.player && state.player.car === car) {
-      // The player's car blew up: throw them out, hurt, on foot. The hook
-      // lives on state so this module never imports the player module.
-      if (state.ejectPlayerFromCar) state.ejectPlayerFromCar(true);
-      else state.player.car = null;
+    game.effects.burst(car.x, car.y, 26, { speed: 180, life: 0.8, size: 5, color: '#ff7a3c' });
+    game.effects.smoke(car.x, car.y, true);
+    game.audio.crash(true);
+    if (car.driver === 'player') game.camera.addShake(12);
+  }
+}
+
+// Pairwise car-vs-car: circles at nose and tail, simple impulse swap.
+export function resolveCarCollisions(game, cars, dt) {
+  for (let i = 0; i < cars.length; i++) {
+    for (let j = i + 1; j < cars.length; j++) {
+      const a = cars[i];
+      const b = cars[j];
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const rr = (a.def.length + b.def.length) / 4 + 4;
+      const d2 = dx * dx + dy * dy;
+      if (d2 >= rr * rr || d2 < 0.01) continue;
+      const d = Math.sqrt(d2);
+      const nx = dx / d;
+      const ny = dy / d;
+      const overlap = rr - d;
+      a.x -= nx * overlap * 0.5;
+      a.y -= ny * overlap * 0.5;
+      b.x += nx * overlap * 0.5;
+      b.y += ny * overlap * 0.5;
+      const relVx = b.vx - a.vx;
+      const relVy = b.vy - a.vy;
+      const closing = -(relVx * nx + relVy * ny);
+      if (closing > 30) {
+        const impulse = closing * 0.55;
+        a.vx -= nx * impulse;
+        a.vy -= ny * impulse;
+        b.vx += nx * impulse;
+        b.vy += ny * impulse;
+        a.speed *= 0.7;
+        b.speed *= 0.7;
+        const now = game.time;
+        if (now - a.lastHitAt > 0.4) {
+          a.lastHitAt = now;
+          b.lastHitAt = now;
+          damageCar(game, a, closing * 0.045);
+          damageCar(game, b, closing * 0.045);
+          const hx = (a.x + b.x) / 2;
+          const hy = (a.y + b.y) / 2;
+          game.effects.sparks(hx, hy);
+          game.audio.crash(closing > 160);
+          if (a.driver === 'player' || b.driver === 'player') game.camera.addShake(Math.min(9, closing * 0.04));
+          game.peds.scareAt(hx, hy, 260);
+        }
+      }
     }
   }
 }
 
-// Circle-vs-car test for bullets, pedestrians and other cars.
-export function carHitTest(car, x, y, radius) {
-  const dx = x - car.x, dy = y - car.y;
-  const c = Math.cos(-car.angle), s = Math.sin(-car.angle);
-  const lx = dx * c - dy * s, ly = dx * s + dy * c;
-  return Math.abs(lx) < car.def.length / 2 + radius && Math.abs(ly) < car.def.width / 2 + radius;
+export function carSpeed(car) {
+  return Math.hypot(car.vx, car.vy);
 }
 
-export function carFront(car) {
-  return {
-    x: car.x + Math.cos(car.angle) * (car.def.length / 2),
-    y: car.y + Math.sin(car.angle) * (car.def.length / 2),
-  };
+export function carNose(car) {
+  return { x: car.x + Math.cos(car.angle) * car.def.length * 0.5, y: car.y + Math.sin(car.angle) * car.def.length * 0.5 };
 }

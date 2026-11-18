@@ -1,228 +1,265 @@
-// Solmar Heat — the wanted level and the Solmar PD.
-// Crimes add stars. Stars bring interceptors that hunt the player, ram their
-// car and box them in; at three stars and up, roadblocks appear ahead. Break
-// line of sight to cool off, or pay for a repaint at Prado's Garage.
+// San Cielo Heat — the wanted system and the SCPD: stars that rise with
+// every crime, cruisers that chase along the road grid, roadblocks at
+// three stars, and the bust that ends a run when the cops box Mara in.
+//
+// Pursuit routing: interceptors drive the streets like everyone else.
+// Each cruiser plans a Manhattan route over the road grid — onto the
+// nearest road, along it to the intersection nearest the player, then
+// down the player's road — and only cuts straight at the target for the
+// final approach, so chases read as chases instead of cross-country
+// shortcuts through buildings.
 
-import { TUNING, clamp, rand, choice, dist, angleTo, angleDiff } from './config.js';
-import { nearestIntersection, randomRoadPoint, isOnRoad } from './city.js';
-import { makeCar, driveCar } from './vehicles.js';
-import { Effects } from './effects.js';
-import { AudioSys } from './audio.js';
+import { PLACES, TUNING } from './config.js';
+import { nearestRoadCenter, nearestRoadPoint, randomRoadPoint } from './city.js';
+import { angleTo, clamp, dist, makeRng } from './util.js';
+import { carSpeed, driveCar, makeVehicle } from './vehicles.js';
 
-export const Police = {
-  wanted: 0,
-  evadeTimer: 0,
-  bustTimer: 0,
-  reportTimer: -1, // pending "shots reported" countdown
-  roadblockTimer: 0,
-  roadblocks: [],
+export class PoliceSystem {
+  constructor(city) {
+    this.city = city;
+    this.wanted = 0;
+    this.cruisers = [];
+    this.roadblocks = [];
+    this.evadeTimer = 0;
+    this.bustTimer = 0;
+    this.spawnTimer = 0;
+    this.rng = makeRng(909090);
+    this.busted = false;
+  }
+
+  addWanted(n, message) {
+    const before = this.wanted;
+    this.wanted = clamp(this.wanted + n, 0, TUNING.maxWanted);
+    if (this.wanted > before && this.game) {
+      if (message && this.game) this.game.addMessage(message);
+      this.game.audio.sirenBlip();
+      this.game.effects.screenFlash('60,90,255', 0.35);
+    }
+    this.evadeTimer = 0;
+  }
+
+  clearWanted(message) {
+    this.wanted = 0;
+    this.evadeTimer = 0;
+    this.bustTimer = 0;
+    for (const c of this.cruisers) c.leaving = true;
+    this.roadblocks = [];
+    if (message && this.game) this.game.addMessage(message);
+  }
+
+  // Gunfire draws attention: a quiet street turns hot fast.
+  noiseAt(x, y) {
+    if (this.wanted === 0) this.addWanted(1, 'Shots reported — police responding!');
+    else this.evadeTimer = 0;
+  }
+
+  wantedCount() {
+    return [0, 1, 2, 3, 4, 5][this.wanted];
+  }
+
+  nearestCopDistance(x, y) {
+    let best = Infinity;
+    for (const c of this.cruisers) best = Math.min(best, dist(c.x, c.y, x, y));
+    return best;
+  }
+
+  nearestAbandonedCruiser(x, y, radius) {
+    for (const c of this.cruisers) {
+      if (c.driver === null && !c.wrecked && dist(c.x, c.y, x, y) < radius) return c;
+    }
+    return null;
+  }
+
+  claimCruiser(car) {
+    const i = this.cruisers.indexOf(car);
+    if (i >= 0) this.cruisers.splice(i, 1);
+  }
+
+  update(dt, game) {
+    this.game = game;
+    const player = game.player;
+
+    // Keep the fleet matched to the heat.
+    const want = this.wantedCount();
+    this.spawnTimer -= dt;
+    if (this.cruisers.length < want && this.spawnTimer <= 0) {
+      this.spawnTimer = 1.2;
+      this.spawnCruiser(game);
+    }
+
+    // Drive every cruiser.
+    for (let i = this.cruisers.length - 1; i >= 0; i--) {
+      const car = this.cruisers[i];
+      if (car.driver === 'player') { this.cruisers.splice(i, 1); continue; }
+      if (car.leaving) {
+        // Heat cleared: drive off and despawn.
+        driveCar(game, car, { throttle: 0.7, steer: 0.1 }, dt);
+        if (dist(car.x, car.y, player.x, player.y) > 900) this.cruisers.splice(i, 1);
+        continue;
+      }
+      const input = this.pursuitInput(car, player, dt);
+      driveCar(game, car, input, dt);
+      car.siren = true;
+
+      // Ramming a cruiser into Mara's car is the SCPD's favourite tactic.
+      if (carSpeed(car) > 60 && dist(car.x, car.y, player.x, player.y) < 60 && player.inCar) {
+        game.peds.scareAt(car.x, car.y, 200);
+      }
+    }
+
+    // Roadblocks at three stars and up.
+    if (this.wanted >= 3 && this.roadblocks.length === 0) this.placeRoadblock(game);
+    if (this.wanted < 3) this.roadblocks = [];
+
+    // Evading: unseen for long enough and one star cools off.
+    if (this.wanted > 0) {
+      const nearest = this.nearestCopDistance(player.x, player.y);
+      if (nearest > 520) {
+        this.evadeTimer += dt;
+        if (this.evadeTimer >= TUNING.evadeTime) {
+          this.evadeTimer = 0;
+          this.wanted -= 1;
+          game.addMessage(this.wanted === 0 ? 'You lost them. The heat is off.' : 'Heat cooling down: ' + this.wanted + ' star' + (this.wanted > 1 ? 's' : '') + '.');
+          if (this.wanted === 0) this.clearWanted(null);
+        }
+      } else {
+        this.evadeTimer = 0;
+      }
+    }
+
+    // Busted: crawling, with a cruiser on the bumper.
+    if (this.wanted > 0 && !player.dead) {
+      const playerSpeed = player.inCar ? carSpeed(player.inCar) : (player.moving ? 120 : 0);
+      const nearest = this.nearestCopDistance(player.x, player.y);
+      if (playerSpeed < 30 && nearest < 70) {
+        this.bustTimer += dt;
+        if (this.bustTimer >= TUNING.bustTime) {
+          this.busted = true;
+          this.bustTimer = 0;
+        }
+      } else {
+        this.bustTimer = Math.max(0, this.bustTimer - dt * 2);
+      }
+    }
+  }
+
+  spawnCruiser(game) {
+    const player = game.player;
+    const spot = randomRoadPoint(this.city, this.rng, player.x, player.y, 380, 700);
+    const type = this.wanted >= 3 ? 'interceptor' : 'cruiser';
+    const car = makeVehicle(type, spot.x, spot.y, angleTo(spot.x, spot.y, player.x, player.y), { driver: 'police' });
+    car.siren = true;
+    car.stuckTimer = 0;
+    this.cruisers.push(car);
+  }
+
+  placeRoadblock(game) {
+    const player = game.player;
+    const ahead = {
+      x: player.x + Math.cos(player.angle) * 420,
+      y: player.y + Math.sin(player.angle) * 420,
+    };
+    const road = nearestRoadPoint(ahead.x, ahead.y);
+    const horizontal = Math.abs(ahead.x - road.x) > Math.abs(ahead.y - road.y);
+    for (const side of [-1, 1]) {
+      const x = horizontal ? road.x : road.x + side * 26;
+      const y = horizontal ? road.y + side * 26 : road.y;
+      const car = makeVehicle('cruiser', x, y, horizontal ? 0 : Math.PI / 2, { driver: 'police' });
+      car.roadblock = true;
+      car.siren = true;
+      this.roadblocks.push(car);
+      this.cruisers.push(car);
+    }
+    game.addMessage('Roadblock ahead!');
+  }
+
+  // Road-following pursuit: follow the planned route over the grid,
+  // re-planning twice a second, and steer straight at the player only
+  // for the final approach.
+  pursuitInput(car, player, dt) {
+    if (car.roadblock) return { throttle: 0, steer: 0 };
+
+    car.routeTimer = (car.routeTimer || 0) - dt;
+    if (car.routeTimer <= 0 || !car.route || car.route.length === 0) {
+      car.routeTimer = 0.5 + Math.random() * 0.2;
+      car.route = this.planRoute(car, player);
+      car.routeStep = 0;
+    }
+    const target = this.routeTarget(car, player);
+    const targetAngle = angleTo(car.x, car.y, target.x, target.y);
+    let d = targetAngle - car.angle;
+    while (d > Math.PI) d -= Math.PI * 2;
+    while (d < -Math.PI) d += Math.PI * 2;
+    const steer = clamp(d * 2.2, -1, 1);
+    const distance = dist(car.x, car.y, player.x, player.y);
+    let throttle = 1;
+    if (distance < 46 && carSpeed(car) > 140) throttle = 0.2; // don't overshoot the ram
+    if (Math.abs(d) > 1.9 && carSpeed(car) > 60) throttle = 0.35; // slow for a hard turn
+
+    // Stuck against a building or a wreck: back up and try a new angle.
+    if (carSpeed(car) < 25 && throttle > 0) {
+      car.stuckTimer = (car.stuckTimer || 0) + dt;
+    } else {
+      car.stuckTimer = 0;
+    }
+    if (car.stuckTimer > 1.1) {
+      car.stuckTimer = -0.7; // reverse for a beat
+      car.route = null; // re-plan from the new spot
+      return { throttle: -1, steer: -steer };
+    }
+    if (car.stuckTimer < 0) return { throttle: -1, steer: -steer };
+    return { throttle, steer };
+  }
+
+  // The waypoint the cruiser steers at: the next route point, or the
+  // player directly when close enough to close in.
+  routeTarget(car, player) {
+    const distance = dist(car.x, car.y, player.x, player.y);
+    if (distance < 130) return { x: player.x, y: player.y };
+    const route = car.route || [];
+    while (car.routeStep < route.length) {
+      const wp = route[car.routeStep];
+      if (dist(car.x, car.y, wp.x, wp.y) < 70) car.routeStep++;
+      else return wp;
+    }
+    return { x: player.x, y: player.y };
+  }
+
+  // Manhattan route over the road grid: onto the nearest road, along
+  // one road to the intersection nearest the player, then to the
+  // player. Picks the shorter of the two L-shaped paths.
+  planRoute(car, player) {
+    const onRoad = nearestRoadPoint(car.x, car.y);
+    const playerRoadX = nearestRoadCenter(player.x);
+    const playerRoadY = nearestRoadCenter(player.y);
+    const carRoadX = nearestRoadCenter(car.x);
+    const carRoadY = nearestRoadCenter(car.y);
+
+    // Same street: no route needed, straight chase.
+    if (Math.abs(car.x - player.x) < 60 || Math.abs(car.y - player.y) < 60) {
+      return [{ x: player.x, y: player.y }];
+    }
+
+    // Two L-paths: across first then down, or down first then across.
+    const viaA = { x: playerRoadX, y: carRoadY };
+    const viaB = { x: carRoadX, y: playerRoadY };
+    const lenA = Math.abs(viaA.x - car.x) + Math.abs(viaA.y - car.y) + Math.abs(player.x - viaA.x) + Math.abs(player.y - viaA.y);
+    const lenB = Math.abs(viaB.x - car.x) + Math.abs(viaB.y - car.y) + Math.abs(player.x - viaB.x) + Math.abs(player.y - viaB.y);
+    const via = lenA <= lenB ? viaA : viaB;
+
+    const route = [];
+    if (dist(car.x, car.y, onRoad.x, onRoad.y) > 50) route.push(onRoad);
+    route.push(via);
+    route.push({ x: player.x, y: player.y });
+    return route;
+  }
 
   reset() {
     this.wanted = 0;
+    this.cruisers = [];
+    this.roadblocks = [];
     this.evadeTimer = 0;
     this.bustTimer = 0;
-    this.reportTimer = -1;
-    this.roadblockTimer = 0;
-    this.roadblocks = [];
-  },
-
-  addHeat(state, stars, message) {
-    if (this.wanted >= TUNING.maxWanted) return;
-    this.wanted = clamp(this.wanted + stars, 0, TUNING.maxWanted);
-    this.evadeTimer = 0;
-    if (message) state.hud.message(message, '#ff8a7a');
-    AudioSys.wantedUp();
-    state.hud.flashWanted();
-  },
-
-  clearHeat(state, silent) {
-    this.wanted = 0;
-    this.evadeTimer = 0;
-    this.bustTimer = 0;
-    this.reportTimer = -1;
-    // The cops give up and drive away: recycle their cars.
-    for (let i = state.cars.length - 1; i >= 0; i--) {
-      if (state.cars[i].driver === 'police') state.cars.splice(i, 1);
-    }
-    this.roadblocks = [];
-    AudioSys.setSiren(false, 0);
-    if (!silent) state.hud.message('You lost the cops.', '#7fd4c1');
-  },
-
-  // A gunshot is only a crime if someone can pin it on you: a cop in earshot
-  // responds at once, otherwise a witness phones it in after a few seconds.
-  hearShot(state, x, y) {
-    if (this.wanted > 0) return;
-    if (this.nearbyPolice(state, 650)) {
-      this.addHeat(state, 1, 'Shots fired — police responding!');
-    } else if (this.reportTimer < 0) {
-      this.reportTimer = 3.5;
-    }
-  },
-
-  nearbyPolice(state, radius) {
-    const p = state.player;
-    const px = p.car ? p.car.x : p.x, py = p.car ? p.car.y : p.y;
-    for (const car of state.cars) {
-      if (car.driver === 'police' && !car.dead && dist(car.x, car.y, px, py) < radius) return true;
-    }
-    return false;
-  },
-
-  wantedCount() {
-    // How many interceptors a wanted level fields.
-    return [0, 1, 2, 3, 4, 6][this.wanted] || 0;
-  },
-
-  update(state, dt) {
-    const p = state.player;
-    const px = p.car ? p.car.x : p.x, py = p.car ? p.car.y : p.y;
-
-    if (this.reportTimer >= 0) {
-      this.reportTimer -= dt;
-      if (this.reportTimer < 0) {
-        this.addHeat(state, 1, 'A witness reported gunfire!');
-      }
-    }
-
-    if (this.wanted === 0) {
-      AudioSys.setSiren(false, dt);
-      return;
-    }
-    AudioSys.setSiren(true, dt);
-
-    // Maintain the pursuit force (roadblock cars hold their post and do
-    // not count toward it).
-    let cops = state.cars.filter((c) => c.driver === 'police' && !c.dead && !c.roadblock);
-    const want = this.wantedCount();
-    while (cops.length < want) {
-      const car = this.spawnInterceptor(state, px, py);
-      state.cars.push(car);
-      cops.push(car);
-    }
-    // Remove wrecked interceptors; replacements arrive above.
-    for (let i = state.cars.length - 1; i >= 0; i--) {
-      const car = state.cars[i];
-      if (car.driver === 'police' && car.dead) state.cars.splice(i, 1);
-    }
-
-    // Pursuit driving: steer at the player, ram speed, slight prediction.
-    const playerSpeed = p.car ? Math.abs(p.car.speed) : 0;
-    for (const cop of cops) {
-      const lead = clamp(playerSpeed * 0.25, 0, 90);
-      const tx = px + (p.car ? Math.cos(p.car.angle) * lead : 0);
-      const ty = py + (p.car ? Math.sin(p.car.angle) * lead : 0);
-      const wantAngle = angleTo(cop.x, cop.y, tx, ty);
-      const diff = angleDiff(cop.angle, wantAngle);
-      const steer = clamp(diff * 2.4, -1, 1);
-      const d = dist(cop.x, cop.y, px, py);
-      const throttle = d > 60 ? 1 : 0.4;
-      driveCar(cop, { throttle, steer, handbrake: Math.abs(diff) > 2.2 }, dt, state.city, state);
-      // Siren strobe particles when close.
-      if (d < 400 && Math.random() < dt * 6) {
-        Effects.burst(cop.x, cop.y - 14, { count: 1, speedMin: 4, speedMax: 12, lifeMin: 0.2, lifeMax: 0.3, sizeMin: 2, sizeMax: 3, colors: ['#ff4040', '#4080ff'] });
-      }
-    }
-
-    // Roadblocks at 3+ stars: two interceptors parked across the road ahead.
-    if (this.wanted >= 3) {
-      this.roadblockTimer -= dt;
-      if (this.roadblockTimer <= 0) {
-        this.roadblockTimer = 14;
-        this.placeRoadblock(state, px, py, p.car ? p.car.angle : p.angle);
-      }
-    }
-
-    // Seen or hidden? Close means seen; far means the trail cools. Any
-    // police car counts, roadblocks included.
-    let nearest = Infinity;
-    for (const car of state.cars) {
-      if (car.driver === 'police' && !car.dead) nearest = Math.min(nearest, dist(car.x, car.y, px, py));
-    }
-    const seen = nearest < 560;
-    if (seen) {
-      this.evadeTimer = 0;
-    } else {
-      this.evadeTimer += dt;
-      if (this.evadeTimer > TUNING.evadeTime) {
-        this.evadeTimer = 0;
-        this.wanted--;
-        state.hud.message('Heat cooling off…', '#ffd76a');
-        if (this.wanted <= 0) this.clearHeat(state);
-      }
-    }
-
-    // Busted: a cop sits on you while you crawl.
-    const crawling = p.car ? Math.abs(p.car.speed) < 26 : true;
-    if (nearest < 78 && crawling && !p.dead) {
-      this.bustTimer += dt;
-      state.hud.showBustProgress(this.bustTimer / TUNING.bustTime);
-      if (this.bustTimer > TUNING.bustTime) {
-        this.bustTimer = 0;
-        state.hud.showBustProgress(0);
-        state.onBusted(state);
-      }
-    } else {
-      this.bustTimer = Math.max(0, this.bustTimer - dt * 2);
-      state.hud.showBustProgress(0);
-    }
-  },
-
-  spawnInterceptor(state, px, py) {
-    // Spawn on a road 550-950 away, ideally ahead of the player.
-    let best = null;
-    for (let i = 0; i < 10; i++) {
-      const cand = randomRoadPoint();
-      const d = dist(cand.x, cand.y, px, py);
-      if (d > 550 && d < 950) { best = cand; break; }
-      if (!best) best = cand;
-    }
-    const angle = angleTo(best.x, best.y, px, py);
-    const car = makeCar('police', best.x, best.y, angle, { driver: 'police', color: '#e8e8e8' });
-    car.cruiseSpeed = TUNING.policeSpeed;
-    return car;
-  },
-
-  placeRoadblock(state, px, py, heading) {
-    // Find a road point ahead of the player and park two interceptors across it.
-    const ahead = { x: px + Math.cos(heading) * 420, y: py + Math.sin(heading) * 420 };
-    const spot = nearestIntersection(ahead.x, ahead.y);
-    if (dist(spot.x, spot.y, px, py) < 240) return;
-    // Clear old roadblocks.
-    for (const rb of this.roadblocks) {
-      const idx = state.cars.indexOf(rb);
-      if (idx >= 0) state.cars.splice(idx, 1);
-    }
-    this.roadblocks = [];
-    const onVerticalRoad = Math.abs(spot.x - ahead.x) < Math.abs(spot.y - ahead.y);
-    for (const side of [-1, 1]) {
-      const car = makeCar('police', spot.x + (onVerticalRoad ? side * 26 : 0), spot.y + (onVerticalRoad ? 0 : side * 26),
-        onVerticalRoad ? Math.PI / 2 : 0, { driver: 'police', color: '#e8e8e8' });
-      car.speed = 0;
-      car.roadblock = true;
-      state.cars.push(car);
-      this.roadblocks.push(car);
-    }
-    state.hud.message('Roadblock ahead!', '#ff8a7a');
-  },
-
-  // The repaint: drive into Prado's Garage with heat and cash, come out clean.
-  tryRepaint(state) {
-    const p = state.player;
-    if (!p.car || this.wanted === 0) return false;
-    const g = state.city.landmarks.garage;
-    if (!g || dist(p.car.x, p.car.y, g.x, g.y) > 150) return false;
-    if (p.money < TUNING.repaintCost) {
-      state.hud.message('Repaint costs ' + TUNING.repaintCost + ' — you are short', '#ff8a7a');
-      return true;
-    }
-    p.money -= TUNING.repaintCost;
-    p.car.color = choice(['#c8452c', '#2c6ec8', '#e8c53d', '#3fae6a', '#e8e8e8', '#8a4fb8']);
-    p.car.health = 100;
-    this.clearHeat(state, true);
-    Effects.confetti(p.car.x, p.car.y);
-    AudioSys.cash();
-    state.hud.message('Fresh paint — the cops lost your trail.', '#7fd4c1');
-    return true;
-  },
-};
+    this.busted = false;
+  }
+}
