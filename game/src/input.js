@@ -1,70 +1,71 @@
-// San Cielo Heat — keyboard and mouse. The game reads this, never the
-// DOM directly, so play-tests and screenshots can drive the same input.
+// San Cielo Heat — keyboard and mouse state, with edge-triggered presses
+// so menus and actions can tell "just pressed" from "held down".
 
 export class Input {
   constructor(canvas) {
-    this.keys = new Set();
-    this.pressed = new Set(); // keys pressed since the last poll
-    this.mouse = { x: 0, y: 0, down: false, clicked: false, rightDown: false };
     this.canvas = canvas;
-    this.anyKey = false;
+    this.down = new Set();
+    this.pressed = new Set();
+    this.mouseX = 0;
+    this.mouseY = 0;
+    this.mouseDown = false;
+    this.clicked = false;
+    this.wheel = 0;
 
-    window.addEventListener('keydown', (e) => {
-      if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) e.preventDefault();
-      if (!this.keys.has(e.code)) this.pressed.add(e.code);
-      this.keys.add(e.code);
-      this.anyKey = true;
+    window.addEventListener('keydown', (event) => {
+      const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
+      if (!event.repeat) this.pressed.add(key);
+      this.down.add(key);
+      if ([' ', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.key)) {
+        event.preventDefault();
+      }
     });
-    window.addEventListener('keyup', (e) => {
-      this.keys.delete(e.code);
+    window.addEventListener('keyup', (event) => {
+      const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
+      this.down.delete(key);
     });
-    window.addEventListener('blur', () => {
-      this.keys.clear();
-      this.mouse.down = false;
+    canvas.addEventListener('mousemove', (event) => {
+      this.mouseX = event.clientX;
+      this.mouseY = event.clientY;
     });
-    canvas.addEventListener('mousemove', (e) => {
-      const r = canvas.getBoundingClientRect();
-      this.mouse.x = (e.clientX - r.left) * (canvas.width / r.width);
-      this.mouse.y = (e.clientY - r.top) * (canvas.height / r.height);
+    canvas.addEventListener('mousedown', (event) => {
+      if (event.button === 0) {
+        this.mouseDown = true;
+        this.clicked = true;
+      }
     });
-    canvas.addEventListener('mousedown', (e) => {
-      if (e.button === 0) { this.mouse.down = true; this.mouse.clicked = true; }
-      if (e.button === 2) this.mouse.rightDown = true;
-      this.anyKey = true;
+    window.addEventListener('mouseup', (event) => {
+      if (event.button === 0) this.mouseDown = false;
     });
-    window.addEventListener('mouseup', (e) => {
-      if (e.button === 0) this.mouse.down = false;
-      if (e.button === 2) this.mouse.rightDown = false;
-    });
-    canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+    canvas.addEventListener('wheel', (event) => {
+      this.wheel += Math.sign(event.deltaY);
+      event.preventDefault();
+    }, { passive: false });
+    canvas.addEventListener('contextmenu', (event) => event.preventDefault());
   }
 
-  down(code) {
-    return this.keys.has(code);
+  isDown(key) {
+    return this.down.has(key);
   }
 
-  // True once, on the frame the key went down.
-  wasPressed(code) {
-    return this.pressed.has(code);
+  wasPressed(key) {
+    return this.pressed.has(key);
   }
 
-  axis(neg, pos) {
-    return (this.down(pos) ? 1 : 0) - (this.down(neg) ? 1 : 0);
-  }
-
-  // WASD / arrows as a normalised movement vector.
-  moveVector() {
-    let x = this.axis('KeyA', 'KeyD') + this.axis('ArrowLeft', 'ArrowRight');
-    let y = this.axis('KeyW', 'KeyS') + this.axis('ArrowUp', 'ArrowDown');
-    x = Math.max(-1, Math.min(1, x));
-    y = Math.max(-1, Math.min(1, y));
-    const len = Math.hypot(x, y);
-    if (len > 1) { x /= len; y /= len; }
+  // Movement axes: x = right, y = down, each in [-1, 1].
+  axes() {
+    let x = 0;
+    let y = 0;
+    if (this.isDown('a') || this.isDown('ArrowLeft')) x -= 1;
+    if (this.isDown('d') || this.isDown('ArrowRight')) x += 1;
+    if (this.isDown('w') || this.isDown('ArrowUp')) y -= 1;
+    if (this.isDown('s') || this.isDown('ArrowDown')) y += 1;
     return { x, y };
   }
 
   endFrame() {
     this.pressed.clear();
-    this.mouse.clicked = false;
+    this.clicked = false;
+    this.wheel = 0;
   }
 }

@@ -1,5 +1,5 @@
-// San Cielo Heat — particles, skid marks, floating texts and flashes:
-// the juice that makes a hit feel like a hit.
+// San Cielo Heat — particles, skid marks, floating text and shockwaves:
+// the juice that makes hits, drifts and explosions read on screen.
 
 import { clamp } from './util.js';
 
@@ -7,67 +7,60 @@ export class Effects {
   constructor() {
     this.particles = [];
     this.skids = [];
-    this.floaters = [];
-    this.flash = 0;
-    this.flashColor = '255,255,255';
+    this.texts = [];
+    this.rings = [];
   }
 
-  burst(x, y, count, opts) {
-    const o = opts || {};
+  burst(x, y, opts) {
+    const count = opts.count || 10;
     for (let i = 0; i < count; i++) {
-      const a = Math.random() * Math.PI * 2;
-      const sp = (o.speed || 120) * (0.4 + Math.random() * 0.8);
+      const angle = Math.random() * Math.PI * 2;
+      const speed = (opts.speed || 120) * (0.3 + Math.random() * 0.9);
       this.particles.push({
         x, y,
-        vx: Math.cos(a) * sp,
-        vy: Math.sin(a) * sp,
-        life: (o.life || 0.5) * (0.6 + Math.random() * 0.7),
-        maxLife: o.life || 0.5,
-        size: (o.size || 3) * (0.6 + Math.random() * 0.8),
-        color: o.color || '#ffcf5a',
-        drag: o.drag || 3,
-        gravity: o.gravity || 0,
+        vx: Math.cos(angle) * speed + (opts.vx || 0),
+        vy: Math.sin(angle) * speed + (opts.vy || 0),
+        life: (opts.life || 0.6) * (0.6 + Math.random() * 0.7),
+        maxLife: opts.life || 0.6,
+        size: (opts.size || 3) * (0.6 + Math.random() * 0.8),
+        color: opts.color || '#ffcf5c',
+        drag: opts.drag || 2.5,
+        gravity: opts.gravity || 0,
       });
     }
     if (this.particles.length > 600) this.particles.splice(0, this.particles.length - 600);
   }
 
-  sparks(x, y) {
-    this.burst(x, y, 10, { speed: 220, life: 0.35, size: 2.5, color: '#ffd94a' });
-  }
-
-  smoke(x, y, big) {
-    this.burst(x, y, big ? 6 : 3, { speed: 40, life: 0.9, size: big ? 9 : 6, color: 'rgba(120,120,120,0.5)', drag: 1 });
-  }
-
-  dust(x, y) {
-    this.burst(x, y, 4, { speed: 60, life: 0.5, size: 5, color: 'rgba(203,195,178,0.6)', drag: 2 });
-  }
-
-  hitPuff(x, y) {
-    this.burst(x, y, 8, { speed: 90, life: 0.4, size: 3.5, color: '#c94a3a' });
-  }
-
-  muzzle(x, y, angle) {
-    this.burst(x + Math.cos(angle) * 14, y + Math.sin(angle) * 14, 3, { speed: 60, life: 0.08, size: 4, color: '#ffe9a3' });
+  smoke(x, y, color) {
+    this.particles.push({
+      x: x + (Math.random() - 0.5) * 8, y: y + (Math.random() - 0.5) * 8,
+      vx: (Math.random() - 0.5) * 24, vy: -18 - Math.random() * 22,
+      life: 0.9 + Math.random() * 0.5, maxLife: 1.2,
+      size: 5 + Math.random() * 5, color: color || '#8a8a8a', drag: 1.2, gravity: -14,
+    });
   }
 
   blood(x, y) {
-    this.burst(x, y, 7, { speed: 110, life: 0.5, size: 3, color: '#a8281e', gravity: 160 });
+    this.burst(x, y, { count: 8, speed: 130, life: 0.5, size: 3, color: '#c22e2e' });
   }
 
-  addSkid(x, y, angle) {
+  sparks(x, y) {
+    this.burst(x, y, { count: 6, speed: 190, life: 0.35, size: 2, color: '#ffd76a' });
+  }
+
+  explosion(x, y) {
+    this.burst(x, y, { count: 34, speed: 260, life: 0.8, size: 6, color: '#ff8a2a' });
+    this.burst(x, y, { count: 20, speed: 150, life: 1.1, size: 8, color: '#5a5a5a' });
+    this.rings.push({ x, y, r: 12, maxR: 130, life: 0.45, maxLife: 0.45 });
+  }
+
+  skid(x, y, angle) {
     this.skids.push({ x, y, angle, life: 5 });
     if (this.skids.length > 400) this.skids.splice(0, this.skids.length - 400);
   }
 
-  floater(x, y, text, color) {
-    this.floaters.push({ x, y, text, color: color || '#ffffff', life: 1.4 });
-  }
-
-  screenFlash(color, amount) {
-    this.flash = Math.max(this.flash, amount);
-    this.flashColor = color;
+  floatText(x, y, text, color) {
+    this.texts.push({ x, y, text, color: color || '#ffffff', life: 1.2, maxLife: 1.2 });
   }
 
   update(dt) {
@@ -75,9 +68,9 @@ export class Effects {
       const p = this.particles[i];
       p.life -= dt;
       if (p.life <= 0) { this.particles.splice(i, 1); continue; }
-      const d = Math.exp(-p.drag * dt);
-      p.vx *= d;
-      p.vy *= d;
+      const drag = Math.exp(-p.drag * dt);
+      p.vx *= drag;
+      p.vy *= drag;
       p.vy += p.gravity * dt;
       p.x += p.vx * dt;
       p.y += p.vy * dt;
@@ -86,49 +79,61 @@ export class Effects {
       this.skids[i].life -= dt;
       if (this.skids[i].life <= 0) this.skids.splice(i, 1);
     }
-    for (let i = this.floaters.length - 1; i >= 0; i--) {
-      const f = this.floaters[i];
-      f.life -= dt;
-      f.y -= 34 * dt;
-      if (f.life <= 0) this.floaters.splice(i, 1);
+    for (let i = this.texts.length - 1; i >= 0; i--) {
+      const t = this.texts[i];
+      t.life -= dt;
+      t.y -= 42 * dt;
+      if (t.life <= 0) this.texts.splice(i, 1);
     }
-    if (this.flash > 0) this.flash = Math.max(0, this.flash - dt * 2.4);
+    for (let i = this.rings.length - 1; i >= 0; i--) {
+      const r = this.rings[i];
+      r.life -= dt;
+      r.r = r.maxR * (1 - r.life / r.maxLife);
+      if (r.life <= 0) this.rings.splice(i, 1);
+    }
   }
 
-  drawWorld(ctx) {
-    // Skid marks lie flat on the asphalt.
+  drawUnder(ctx) {
     for (const s of this.skids) {
       ctx.save();
       ctx.translate(s.x, s.y);
       ctx.rotate(s.angle);
-      ctx.fillStyle = 'rgba(20,20,22,' + (0.35 * clamp(s.life / 5, 0, 1)).toFixed(3) + ')';
-      ctx.fillRect(-7, -2, 14, 4);
+      ctx.globalAlpha = clamp(s.life / 5, 0, 1) * 0.5;
+      ctx.fillStyle = '#22222a';
+      ctx.fillRect(-7, -2.5, 14, 5);
       ctx.restore();
-    }
-    for (const p of this.particles) {
-      const a = clamp(p.life / p.maxLife, 0, 1);
-      ctx.globalAlpha = a;
-      ctx.fillStyle = p.color;
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, p.size * (0.5 + a * 0.5), 0, Math.PI * 2);
-      ctx.fill();
-    }
-    ctx.globalAlpha = 1;
-    ctx.textAlign = 'center';
-    ctx.font = 'bold 15px sans-serif';
-    for (const f of this.floaters) {
-      ctx.globalAlpha = clamp(f.life, 0, 1);
-      ctx.fillStyle = 'rgba(0,0,0,0.6)';
-      ctx.fillText(f.text, f.x + 1, f.y + 1);
-      ctx.fillStyle = f.color;
-      ctx.fillText(f.text, f.x, f.y);
     }
     ctx.globalAlpha = 1;
   }
 
-  drawScreenFlash(ctx, w, h) {
-    if (this.flash <= 0) return;
-    ctx.fillStyle = 'rgba(' + this.flashColor + ',' + (this.flash * 0.35).toFixed(3) + ')';
-    ctx.fillRect(0, 0, w, h);
+  drawOver(ctx) {
+    for (const r of this.rings) {
+      ctx.save();
+      ctx.globalAlpha = clamp(r.life / r.maxLife, 0, 1) * 0.8;
+      ctx.strokeStyle = '#ffdf8a';
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.arc(r.x, r.y, r.r, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+    for (const p of this.particles) {
+      ctx.globalAlpha = clamp(p.life / p.maxLife, 0, 1);
+      ctx.fillStyle = p.color;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    ctx.textAlign = 'center';
+    ctx.font = 'bold 15px Verdana, sans-serif';
+    for (const t of this.texts) {
+      ctx.globalAlpha = clamp(t.life / t.maxLife, 0, 1);
+      ctx.fillStyle = '#101010';
+      ctx.fillText(t.text, t.x + 1, t.y + 1);
+      ctx.fillStyle = t.color;
+      ctx.fillText(t.text, t.x, t.y);
+    }
+    ctx.globalAlpha = 1;
   }
 }

@@ -1,8 +1,8 @@
-// San Cielo Heat — the chase camera: smooth follow, speed zoom-out,
-// and impact shake. The world is drawn through this transform.
+// San Cielo Heat — the camera: follows the player with a soft lag, looks
+// ahead in the direction of travel, and shakes on impacts.
 
 import { WORLD } from './config.js';
-import { clamp, damp, lerp } from './util.js';
+import { clamp, damp } from './util.js';
 
 export class Camera {
   constructor(viewW, viewH) {
@@ -24,61 +24,48 @@ export class Camera {
   snapTo(x, y) {
     this.x = x;
     this.y = y;
+    this.shake = 0;
   }
 
-  follow(targetX, targetY, speed, dt) {
-    // Lead slightly in the direction of travel so fast driving reads ahead.
-    const lead = clamp(speed / 300, 0, 1) * 40;
-    const tx = targetX + Math.cos(this.leadAngle || 0) * lead;
-    const ty = targetY + Math.sin(this.leadAngle || 0) * lead;
-    this.x = damp(this.x, tx, 5, dt);
-    this.y = damp(this.y, ty, 5, dt);
-    const wantZoom = speed > 220 ? 0.88 : speed > 120 ? 0.95 : 1;
-    this.zoom = damp(this.zoom, wantZoom, 2.5, dt);
-    if (this.shake > 0) {
-      this.shake = Math.max(0, this.shake - dt * 26);
-      this.shakeX = (Math.random() - 0.5) * this.shake;
-      this.shakeY = (Math.random() - 0.5) * this.shake;
+  addShake(amount) {
+    this.shake = Math.min(26, this.shake + amount);
+  }
+
+  update(targetX, targetY, lookX, lookY, dt) {
+    const focusX = targetX + (lookX || 0) * 70;
+    const focusY = targetY + (lookY || 0) * 70;
+    this.x = damp(this.x, focusX, 5.5, dt);
+    this.y = damp(this.y, focusY, 5.5, dt);
+    const halfW = this.viewW / 2 / this.zoom;
+    const halfH = this.viewH / 2 / this.zoom;
+    this.x = clamp(this.x, halfW - 120, WORLD - halfW + 120);
+    this.y = clamp(this.y, halfH - 120, WORLD - halfH + 120);
+    if (this.shake > 0.2) {
+      this.shake = damp(this.shake, 0, 6, dt);
+      this.shakeX = (Math.random() * 2 - 1) * this.shake;
+      this.shakeY = (Math.random() * 2 - 1) * this.shake;
     } else {
+      this.shake = 0;
       this.shakeX = 0;
       this.shakeY = 0;
     }
   }
 
-  setLeadAngle(angle) {
-    this.leadAngle = angle;
-  }
+  // World coordinates of the top-left corner of the visible area.
+  viewLeft() { return this.x - this.viewW / 2 / this.zoom + this.shakeX; }
+  viewTop() { return this.y - this.viewH / 2 / this.zoom + this.shakeY; }
 
-  addShake(amount) {
-    this.shake = Math.min(18, this.shake + amount);
-  }
-
-  apply(ctx) {
-    ctx.save();
-    ctx.translate(this.viewW / 2 + this.shakeX, this.viewH / 2 + this.shakeY);
-    ctx.scale(this.zoom, this.zoom);
-    ctx.translate(-this.x, -this.y);
-  }
-
-  restore(ctx) {
-    ctx.restore();
-  }
-
-  viewBounds() {
-    const hw = this.viewW / 2 / this.zoom;
-    const hh = this.viewH / 2 / this.zoom;
-    return { x0: this.x - hw - 40, y0: this.y - hh - 40, x1: this.x + hw + 40, y1: this.y + hh + 40 };
-  }
-
-  screenToWorld(sx, sy) {
+  toScreen(wx, wy) {
     return {
-      x: this.x + (sx - this.viewW / 2) / this.zoom,
-      y: this.y + (sy - this.viewH / 2) / this.zoom,
+      x: (wx - this.x) * this.zoom + this.viewW / 2 + this.shakeX,
+      y: (wy - this.y) * this.zoom + this.viewH / 2 + this.shakeY,
     };
   }
 
-  visible(x, y, margin) {
-    const b = this.viewBounds();
-    return x >= b.x0 - margin && x <= b.x1 + margin && y >= b.y0 - margin && y <= b.y1 + margin;
+  toWorld(sx, sy) {
+    return {
+      x: (sx - this.viewW / 2 - this.shakeX) / this.zoom + this.x,
+      y: (sy - this.viewH / 2 - this.shakeY) / this.zoom + this.y,
+    };
   }
 }

@@ -1,8 +1,8 @@
-// San Cielo Heat — missions and the story: six jobs for Ram that take
-// Mara from car thief to the queen of the bay, plus repeatable courier
-// runs for quick cash.
+// San Cielo Heat — missions and the story: six jobs for Ram that take Mara
+// from car thief to the queen of the bay, plus repeatable courier runs.
 
 import { PLACES, TUNING } from './config.js';
+import { collideCar } from './city.js';
 import { dist, formatMoney, formatTime } from './util.js';
 import { driveCar, makeVehicle } from './vehicles.js';
 
@@ -61,239 +61,222 @@ const STORY = [
     ],
   },
   {
-    id: 'marina-lights',
-    title: 'Marina Lights',
-    brief: 'One last delivery, under every star in the sky.',
+    id: 'queen-of-the-bay',
+    title: 'Queen of the Bay',
+    brief: 'One last run: the Kestrel boss is at the Marina. End it.',
     reward: 800,
-    startWanted: 3,
     steps: [
-      { type: 'gotoTimed', x: PLACES.marina.x, y: PLACES.marina.y - 130, radius: 80, time: 150, text: 'Deliver the goods to the yacht at Marina Pier.' },
-      { type: 'survive', time: 20, text: 'Hold the pier until the boat leaves!' },
+      { type: 'goto', x: PLACES.marina.x, y: PLACES.marina.y, radius: 110, text: 'Reach the Marina Pier.' },
+      { type: 'clearEnemies', count: 6, text: 'Take down the Kestrel crew.' },
+      { type: 'loseWanted', text: 'Lose the heat and disappear.' },
     ],
   },
 ];
 
-const COURIER_SPOTS = [
-  { x: PLACES.bazaar.x, y: PLACES.bazaar.y, name: 'Grand Bazaar' },
-  { x: PLACES.arena.x, y: PLACES.arena.y, name: 'Sunset Arena' },
-  { x: PLACES.marina.x, y: PLACES.marina.y - 130, name: 'Marina Pier' },
-  { x: PLACES.hospital.x, y: PLACES.hospital.y, name: 'St. Cielo Hospital' },
-  { x: PLACES.depot.x, y: PLACES.depot.y, name: 'Harbor Depot' },
+// Courier loops: fixed pairs of pickup/dropoff spots around the city.
+const COURIER_STOPS = [
+  { from: 'Downtown', x: 1380, y: 380, to: 'Harbor Depot', tx: 2980, ty: 580 },
+  { from: 'Grand Bazaar', x: 1380, y: 2180, to: 'Sunset Arena', tx: 2580, ty: 1380 },
+  { from: 'Palm Heights', x: 580, y: 1780, to: 'Marina Pier', tx: 1780, ty: 3400 },
+  { from: 'Cielo Park', x: 1580, y: 1580, to: 'St. Cielo Hospital', tx: 580, ty: 980 },
+  { from: 'Harbor Depot', x: 2980, y: 580, to: 'Fort San Cielo', tx: 380, ty: 3180 },
 ];
 
 export class MissionSystem {
   constructor() {
     this.storyIndex = 0;
-    this.completed = [];
     this.active = null;
+    this.stepIndex = 0;
+    this.stepTimer = 0;
     this.courier = null;
-    this.couriersDone = 0;
-    this.storyDone = false;
+    this.courierIndex = 0;
+    this.targetCar = null;
+    this.enemiesLeft = 0;
+    this.briefcaseCarried = false;
+    this.completedStory = false;
   }
 
-  currentDef() {
+  get currentStory() {
     return STORY[this.storyIndex] || null;
   }
 
-  atGarage(player) {
-    return dist(player.x, player.y, PLACES.garage.x, PLACES.garage.y) < 110;
+  get currentStep() {
+    if (!this.active) return null;
+    return this.active.steps[this.stepIndex] || null;
   }
 
-  canStartStory(game) {
-    return !this.active && !this.storyDone && this.atGarage(game.player);
+  get objectiveText() {
+    if (this.courier) {
+      if (this.courier.phase === 'pickup') return 'Courier: pick up the parcel at ' + this.courier.stop.from + '.';
+      return 'Courier: deliver to ' + this.courier.stop.to + ' (' + formatTime(this.courier.timeLeft) + ').';
+    }
+    const step = this.currentStep;
+    if (!step) return this.completedStory ? 'Story complete — free roam, or run courier jobs (E at a stop).' : "Go to Ram's Garage (green marker) to start your next job.";
+    if (step.type === 'gotoTimed' || step.type === 'escape') return step.text + ' (' + formatTime(this.stepTimer) + ')';
+    if (step.type === 'clearEnemies') return step.text + ' (' + this.enemiesLeft + ' left)';
+    return step.text;
+  }
+
+  get objectivePoint() {
+    if (this.courier) {
+      return this.courier.phase === 'pickup'
+        ? { x: this.courier.stop.x, y: this.courier.stop.y }
+        : { x: this.courier.stop.tx, y: this.courier.stop.ty };
+    }
+    const step = this.currentStep;
+    if (step && step.x !== undefined) return { x: step.x, y: step.y };
+    if (this.targetCar && !this.targetCar.dead) return { x: this.targetCar.x, y: this.targetCar.y };
+    if (!this.active && !this.completedStory) return { x: PLACES.garage.x, y: PLACES.garage.y };
+    return null;
   }
 
   startStory(game) {
-    const def = this.currentDef();
-    if (!def) return;
-    this.active = { def, step: 0, timer: 0, data: {}, briefTimer: 4 };
-    game.splash(def.title, def.brief);
-    game.audio.missionDone();
-    if (def.startWanted) game.police.addWanted(def.startWanted, 'The heat is on!');
+    const story = this.currentStory;
+    if (!story || this.active) return false;
+    this.active = story;
+    this.stepIndex = 0;
+    this.stepTimer = 0;
+    this.briefcaseCarried = false;
+    if (story.startWanted) game.player.addWanted(story.startWanted);
     this.enterStep(game);
+    game.splash(story.title, story.brief);
+    game.addMessage(story.brief);
+    return true;
   }
 
   enterStep(game) {
-    const m = this.active;
-    if (!m) return;
-    const step = m.def.steps[m.step];
-    m.timer = step.time || 0;
+    const step = this.currentStep;
+    if (!step) return;
+    if (step.type === 'gotoTimed' || step.type === 'escape') this.stepTimer = step.time;
     if (step.type === 'takedown') {
-      const car = makeVehicle('van', PLACES.depot.x, PLACES.depot.y, 0, { driver: 'courier', color: '#3a3a40' });
-      car.courierAI = { waypoints: courierLoop(), wp: 0 };
-      m.data.targetCar = car;
-      game.courierCars.push(car);
-      game.addMessage('Courier spotted near the Harbor Depot.');
+      this.targetCar = makeVehicle('van', 2980, 300, 0, '#3c3c44');
+      this.targetCar.driver = 'courier';
+      this.targetCar.speed = 150;
+      game.courierCars.push(this.targetCar);
+      game.addMessage('The Kestrel courier is on the move — marked on your minimap.');
     }
     if (step.type === 'clearEnemies') {
-      m.data.kills = 0;
-      for (let i = 0; i < step.count; i++) {
-        const gx = PLACES.depot.x + (i % 2 === 0 ? -70 : 70);
-        const gy = PLACES.depot.y + (i < 2 ? -50 : 50);
-        game.combat.spawnEnemy(gx, gy, { guard: { x: gx, y: gy }, health: 55 });
+      const stepDef = step;
+      const cx = this.active.id === 'queen-of-the-bay' ? PLACES.marina.x : PLACES.depot.x;
+      const cy = this.active.id === 'queen-of-the-bay' ? PLACES.marina.y : PLACES.depot.y;
+      for (let i = 0; i < stepDef.count; i++) {
+        game.combat.spawnEnemy(cx + (Math.random() - 0.5) * 220, cy + (Math.random() - 0.5) * 220, { alerted: true, dropCash: 60 });
       }
-    }
-    if (step.type === 'survive') {
-      for (let i = 0; i < 3; i++) {
-        game.combat.spawnEnemy(PLACES.marina.x - 120 + i * 120, PLACES.marina.y - 260, { health: 45 });
-      }
+      this.enemiesLeft = stepDef.count;
+      if (this.active.id === 'queen-of-the-bay') game.player.addWanted(3);
+      game.addMessage('Hostiles ahead — take them down.');
     }
     if (step.type === 'escape') {
-      game.police.addWanted(2, 'The Kestrels called the cops!');
+      game.player.addWanted(3);
     }
   }
 
-  advance(game) {
-    const m = this.active;
-    m.step++;
-    if (m.step >= m.def.steps.length) {
+  advanceStep(game) {
+    this.stepIndex++;
+    if (this.stepIndex >= this.active.steps.length) {
       this.completeStory(game);
-      return;
+    } else {
+      this.enterStep(game);
     }
-    this.enterStep(game);
-    game.addMessage(m.def.steps[m.step].text);
   }
 
   completeStory(game) {
-    const m = this.active;
-    this.completed.push(m.def.id);
-    game.player.money += m.def.reward;
-    game.splash('Job Done', m.def.title + ' — +' + formatMoney(m.def.reward));
-    game.audio.missionDone();
-    game.effects.floater(game.player.x, game.player.y - 30, '+' + formatMoney(m.def.reward), '#7ddb6a');
+    const reward = this.active.reward;
+    game.player.addMoney(reward);
+    game.player.missionsDone++;
+    game.splash('Job Complete', '+' + formatMoney(reward));
+    game.addMessage('Job complete: ' + this.active.title + ' — ' + formatMoney(reward) + ' earned.');
+    if (game.audio) game.audio.jingle();
     this.storyIndex++;
     this.active = null;
+    this.stepIndex = 0;
     if (this.storyIndex >= STORY.length) {
-      this.storyDone = true;
-      game.splash('Queen of the Bay', 'Every job done. San Cielo is yours, Mara.');
+      this.completedStory = true;
+      game.splash('Queen of the Bay', 'The Kestrels are finished. San Cielo is yours.');
     }
     game.saveGame();
   }
 
-  failActive(game, reason) {
-    if (!this.active) return;
-    const m = this.active;
-    if (m.data.targetCar) {
-      const i = game.courierCars.indexOf(m.data.targetCar);
-      if (i >= 0) game.courierCars.splice(i, 1);
-    }
-    this.active = null;
+  failStory(game, reason) {
     game.splash('Job Failed', reason);
-    game.audio.missionFail();
+    game.addMessage('Job failed: ' + reason);
+    if (game.audio) game.audio.missionFail();
+    this.active = null;
+    this.stepIndex = 0;
+    this.targetCar = null;
+    game.courierCars = [];
   }
 
-  onEnterCar(car) {
-    if (!this.active) return;
-    const step = this.active.def.steps[this.active.step];
-    if (step.type === 'stealCar') this.advanceStepSafe();
-  }
-
-  advanceStepSafe() {
-    // advance() needs the game for messages; the caller re-enters via update.
-    this._pendingAdvance = true;
-  }
-
-  onEnemyDown(enemy) {
-    if (!this.active) return;
-    const step = this.active.def.steps[this.active.step];
-    if (step.type === 'clearEnemies') {
-      this.active.data.kills = (this.active.data.kills || 0) + 1;
+  onEnemyDown(game) {
+    const step = this.currentStep;
+    if (this.active && step && step.type === 'clearEnemies') {
+      this.enemiesLeft = Math.max(0, this.enemiesLeft - 1);
+      if (this.enemiesLeft <= 0) this.advanceStep(game);
     }
   }
 
-  onBriefcaseTaken(pickup) {
-    if (!this.active) return;
-    const step = this.active.def.steps[this.active.step];
-    if (step.type === 'briefcase') this._pendingAdvance = true;
-  }
-
-  // ---- courier side jobs ----
-
-  nearCourierSpot(player) {
-    return COURIER_SPOTS.find((s) => dist(player.x, player.y, s.x, s.y) < 80) || null;
-  }
-
-  tryStartCourier(game) {
-    if (this.courier || this.active) return;
-    const spot = this.nearCourierSpot(game.player);
-    if (!spot) return;
-    const targets = COURIER_SPOTS.filter((s) => s !== spot);
-    const target = targets[Math.floor(Math.random() * targets.length)];
-    const d = dist(spot.x, spot.y, target.x, target.y);
-    const time = Math.max(45, d / 26);
-    this.courier = {
-      from: spot,
-      target,
-      timer: time,
-      total: time,
-      reward: Math.round(80 + d / 18),
-    };
-    game.addMessage('Courier job: deliver to ' + target.name + ' in ' + formatTime(time) + ' — $' + this.courier.reward + '.');
-    game.audio.pickup();
-  }
-
-  // ---- paint shop: always available, not just in missions ----
-
-  updatePaintShop(game) {
-    const player = game.player;
-    if (!player.inCar || game.police.wanted === 0) return;
-    if (dist(player.x, player.y, PLACES.paintShop.x, PLACES.paintShop.y) > 80) return;
-    if (player.money < TUNING.repaintCost) {
-      if (!this._paintWarned) {
-        this._paintWarned = true;
-        game.addMessage('Respray costs ' + formatMoney(TUNING.repaintCost) + ' — not enough cash.');
-      }
-      return;
+  onBriefcase(game) {
+    const step = this.currentStep;
+    if (this.active && step && step.type === 'briefcase') {
+      this.briefcaseCarried = true;
+      game.addMessage('Briefcase secured. Get it to Ram.');
+      this.advanceStep(game);
     }
-    this._paintWarned = false;
-    player.money -= TUNING.repaintCost;
-    player.inCar.color = '#' + Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, '0');
-    game.police.clearWanted('Fresh paint, clean slate. The heat is off.');
-    game.audio.cash();
-    game.effects.burst(player.x, player.y, 18, { speed: 90, life: 0.5, size: 4, color: '#f2c14e' });
+  }
+
+  onCarStolen(game) {
+    const step = this.currentStep;
+    if (this.active && step && step.type === 'stealCar') this.advanceStep(game);
+  }
+
+  startCourier(game) {
+    if (this.courier || this.active) return false;
+    const stop = COURIER_STOPS[this.courierIndex % COURIER_STOPS.length];
+    this.courierIndex++;
+    this.courier = { stop, phase: 'pickup', timeLeft: 100 };
+    game.addMessage('Courier job: collect the parcel at ' + stop.from + '.');
+    return true;
   }
 
   update(dt, game) {
-    this.updatePaintShop(game);
-    if (this._pendingAdvance && this.active) {
-      this._pendingAdvance = false;
-      this.advance(game);
-    }
+    const player = game.player;
+    const px = player.inCar ? player.inCar.x : player.x;
+    const py = player.inCar ? player.inCar.y : player.y;
 
-    // Courier timer.
+    // Courier job progress.
     if (this.courier) {
       const c = this.courier;
-      c.timer -= dt;
-      if (dist(game.player.x, game.player.y, c.target.x, c.target.y) < 80) {
-        game.player.money += c.reward;
-        this.couriersDone++;
-        game.addMessage('Delivered! +' + formatMoney(c.reward));
-        game.audio.cash();
-        this.courier = null;
-        game.saveGame();
-      } else if (c.timer <= 0) {
-        game.addMessage('Courier job failed — too slow.');
-        game.audio.missionFail();
-        this.courier = null;
+      if (c.phase === 'pickup') {
+        if (dist(px, py, c.stop.x, c.stop.y) < 80) {
+          c.phase = 'deliver';
+          c.timeLeft = 100;
+          game.addMessage('Parcel collected. Deliver to ' + c.stop.to + ' — hurry!');
+        }
+      } else {
+        c.timeLeft -= dt;
+        if (dist(px, py, c.stop.tx, c.stop.ty) < 80) {
+          const pay = 120;
+          player.addMoney(pay);
+          player.courierDone++;
+          game.splash('Delivered', '+' + formatMoney(pay));
+          if (game.audio) game.audio.cash();
+          this.courier = null;
+          game.saveGame();
+        } else if (c.timeLeft <= 0) {
+          game.addMessage('Courier job failed — too slow.');
+          this.courier = null;
+        }
       }
+      return;
     }
 
-    const m = this.active;
-    if (!m) return;
-    const step = m.def.steps[m.step];
-    const player = game.player;
+    const step = this.currentStep;
+    if (!this.active || !step) return;
 
     if (step.type === 'gotoTimed' || step.type === 'escape') {
-      m.timer -= dt;
-      if (m.timer <= 0) {
-        this.failActive(game, 'Out of time.');
-        return;
-      }
-    }
-    if (step.type === 'survive') {
-      m.timer -= dt;
-      if (m.timer <= 0) {
-        this.advance(game);
+      this.stepTimer -= dt;
+      if (this.stepTimer <= 0) {
+        this.failStory(game, 'Out of time.');
         return;
       }
     }
@@ -302,85 +285,58 @@ export class MissionSystem {
       case 'goto':
       case 'gotoTimed':
       case 'escape':
-        if (dist(player.x, player.y, step.x, step.y) < step.radius) this.advance(game);
+        if (dist(px, py, step.x, step.y) < step.radius) this.advanceStep(game);
         break;
       case 'gotoCar':
-        if (player.inCar && dist(player.x, player.y, step.x, step.y) < step.radius) this.advance(game);
+        if (player.inCar && dist(px, py, step.x, step.y) < step.radius) this.advanceStep(game);
         break;
       case 'loseWanted':
-        if (game.police.wanted === 0) this.advance(game);
+        if (player.wanted === 0) this.advanceStep(game);
         break;
-      case 'takedown': {
-        const car = m.data.targetCar;
-        if (car && (car.wrecked || (car.health < car.maxHealth * 0.3 && Math.hypot(car.vx, car.vy) < 12))) {
-          game.pickups.dropBriefcase(car.x, car.y);
-          game.addMessage('The courier is stopped. Grab the briefcase!');
-          this.advance(game);
+      case 'takedown':
+        if (this.targetCar && this.targetCar.damage >= 0.85) {
+          this.targetCar.dead = true;
+          this.targetCar.speed = 0;
+          game.pickups.spawnBriefcase(this.targetCar.x, this.targetCar.y);
+          if (game.effects) game.effects.explosion(this.targetCar.x, this.targetCar.y);
+          if (game.audio) game.audio.crash(1);
+          game.camera.addShake(14);
+          this.advanceStep(game);
         }
-        break;
-      }
-      case 'clearEnemies':
-        if ((m.data.kills || 0) >= step.count) this.advance(game);
         break;
       default:
         break;
     }
   }
-
-  // What the HUD points at right now.
-  activeObjective(game) {
-    if (this.active) {
-      const step = this.active.def.steps[this.active.step];
-      if (step.x !== undefined) return { text: step.text, x: step.x, y: step.y, timer: step.time ? this.active.timer : null };
-      if (step.type === 'takedown' && this.active.data.targetCar) {
-        const c = this.active.data.targetCar;
-        return { text: step.text, x: c.x, y: c.y, timer: null };
-      }
-      if (step.type === 'briefcase') {
-        const b = game.pickups.pickups.find((p) => p.kind === 'briefcase' && p.active);
-        return { text: step.text, x: b ? b.x : PLACES.depot.x, y: b ? b.y : PLACES.depot.y, timer: null };
-      }
-      return { text: step.text, x: null, y: null, timer: step.time ? this.active.timer : null };
-    }
-    if (this.courier) {
-      return { text: 'Courier: deliver to ' + this.courier.target.name, x: this.courier.target.x, y: this.courier.target.y, timer: this.courier.timer };
-    }
-    if (!this.storyDone) {
-      return { text: 'Go to ' + PLACES.garage.name + " to start: " + (this.currentDef() ? this.currentDef().title : ''), x: PLACES.garage.x, y: PLACES.garage.y, timer: null };
-    }
-    return { text: 'Free roam — courier jobs pay at the gold markers.', x: null, y: null, timer: null };
-  }
-
-  reset() {
-    this.storyIndex = 0;
-    this.completed = [];
-    this.active = null;
-    this.courier = null;
-    this.couriersDone = 0;
-    this.storyDone = false;
-  }
 }
 
-function courierLoop() {
-  return [
-    { x: 2980, y: 580 },
-    { x: 2980, y: 1780 },
-    { x: 1780, y: 1780 },
-    { x: 1780, y: 580 },
-  ];
-}
-
-// The courier van drives a road loop, speeding up when Mara closes in.
+// The Kestrel courier van flees along the roads when the player closes in.
 export function updateCourierCar(game, car, dt) {
-  const ai = car.courierAI;
-  if (!ai || car.wrecked) return;
-  const target = ai.waypoints[ai.wp];
-  const d = dist(car.x, car.y, target.x, target.y);
-  if (d < 70) ai.wp = (ai.wp + 1) % ai.waypoints.length;
-  const wantAngle = Math.atan2(target.y - car.y, target.x - car.x);
-  let diff = wantAngle - car.angle;
-  while (diff > Math.PI) diff -= Math.PI * 2;
-  while (diff < -Math.PI) diff += Math.PI * 2;
-  const playerNear = dist(car.x, car.y, game.player.x, game.player.y) < 350;
-  driveCar(game, car, { throttle: playerNear ? 1 : 0.75, steer: Math.max(-1, Math.min(1, diff * 2)) }, dt);
+  const player = game.player;
+  const px = player.inCar ? player.inCar.x : player.x;
+  const py = player.inCar ? player.inCar.y : player.y;
+  const d = dist(car.x, car.y, px, py);
+  const flee = d < 700;
+  let targetAngle = car.angle;
+  if (flee) {
+    // Flee along the nearest road: pick the road direction away from the player.
+    const roadX = car.x;
+    const roadY = car.y;
+    const away = Math.atan2(car.y - py, car.x - px);
+    // Snap to the nearest axis so the van stays on streets.
+    const snapped = Math.round(away / (Math.PI / 2)) * (Math.PI / 2);
+    targetAngle = snapped;
+    car.speed = Math.min(car.speed + 120 * dt, 300);
+  } else {
+    car.speed = Math.max(90, car.speed - 60 * dt);
+  }
+  const diff = targetAngle - car.angle;
+  const wrapped = Math.atan2(Math.sin(diff), Math.cos(diff));
+  car.angle += Math.max(-2.4 * dt, Math.min(2.4 * dt, wrapped));
+  driveCar(car, 1, 0, false, dt);
+  car.speed = Math.min(car.speed, 300);
+  if (collideCar(game.city, car, car.def.len / 2, car.def.wid / 2)) {
+    car.speed *= 0.5;
+    car.angle += 0.6;
+  }
 }

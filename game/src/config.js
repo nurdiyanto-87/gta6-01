@@ -1,11 +1,11 @@
-// San Cielo Heat — world constants, district layout, palette and tuning.
-// Every number that shapes the city, the cars and the chase lives here.
+// San Cielo Heat — world layout, districts, palette and tuning numbers.
+// One file holds every constant that shapes the city and the chase.
 
 export const WORLD = 3600; // the city is a square, WORLD x WORLD pixels
 export const ROAD_WIDTH = 84;
 export const BLOCK = 400; // distance between neighbouring road centres
 export const ROAD_CENTERS = [180, 580, 980, 1380, 1780, 2180, 2580, 2980, 3380];
-export const OCEAN_Y = 3432; // below the last road the beach meets the sea
+export const OCEAN_Y = 3432; // below the last road the sand meets the sea
 export const CITY_SEED = 20261117;
 
 // Blocks are the 8x8 squares between roads, indexed col 0..7, row 0..7.

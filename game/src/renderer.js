@@ -1,293 +1,266 @@
-// San Cielo Heat — the world renderer: ground, roads and markings,
-// buildings, props and every moving thing, painted back to front with
-// viewport culling so the frame stays fast.
+// San Cielo Heat — the world renderer: ground, roads and markings, the
+// ocean and beach, buildings, props, entities sorted by depth, and the
+// mission markers and objective beacon.
 
-import { BLOCK, OCEAN_Y, PALETTE, PLACES, ROAD_CENTERS, ROAD_WIDTH, WORLD, districtKeyForBlock } from './config.js';
+import { BLOCK, OCEAN_Y, PALETTE, ROAD_CENTERS, ROAD_WIDTH, WORLD } from './config.js';
 import { buildingsInView } from './city.js';
-import { dist } from './util.js';
 import { drawBuilding, drawLamp, drawPerson, drawProp, drawTree, drawVehicle } from './sprites.js';
-import { pickupKindInfo } from './pickups.js';
-
-const HALF_ROAD = ROAD_WIDTH / 2;
+import { clamp } from './util.js';
 
 export function drawWorld(ctx, game) {
-  const camera = game.camera;
-  const city = game.city;
-  const b = camera.viewBounds();
-  const time = game.time;
+  const cam = game.camera;
+  const left = cam.viewLeft();
+  const top = cam.viewTop();
+  const right = left + game.viewW / cam.zoom;
+  const bottom = top + game.viewH / cam.zoom;
 
-  // ---- ground base ----
+  ctx.save();
+  ctx.translate(game.viewW / 2, game.viewH / 2);
+  ctx.scale(cam.zoom, cam.zoom);
+  ctx.translate(-cam.x + cam.shakeX, -cam.y + cam.shakeY);
+
+  drawGround(ctx, left, top, right, bottom, game.time);
+  drawRoads(ctx, left, top, right, bottom);
+  drawOcean(ctx, left, top, right, bottom, game.time);
+
+  // Ground decals: skid marks, then the mission ground markers.
+  game.effects.drawUnder(ctx);
+  drawGroundMarkers(ctx, game, game.time);
+
+  // Buildings in view, then everything else sorted by y for depth.
+  const buildings = buildingsInView(game.city, left - 80, top - 80, right + 80, bottom + 80);
+  for (const b of buildings) drawBuilding(ctx, b, game.time);
+
+  const drawables = [];
+  for (const t of game.city.trees) {
+    if (t.x > left - 40 && t.x < right + 40 && t.y > top - 40 && t.y < bottom + 40) {
+      drawables.push({ y: t.y, draw: () => drawTree(ctx, t, game.time) });
+    }
+  }
+  for (const lamp of game.city.lamps) {
+    if (lamp.x > left && lamp.x < right && lamp.y > top && lamp.y < bottom) {
+      drawables.push({ y: lamp.y, draw: () => drawLamp(ctx, lamp) });
+    }
+  }
+  for (const prop of game.city.props) {
+    if (prop.kind === 'pier') continue;
+    if (prop.x > left - 40 && prop.x < right + 40 && prop.y > top - 40 && prop.y < bottom + 40) {
+      drawables.push({ y: prop.y, draw: () => drawProp(ctx, prop) });
+    }
+  }
+  for (const car of game.allCars) {
+    if (car.x > left - 90 && car.x < right + 90 && car.y > top - 90 && car.y < bottom + 90) {
+      drawables.push({
+        y: car.y,
+        draw: () => drawVehicle(ctx, car.x, car.y, car.angle, car.def, car.color, {
+          flash: car.sirenPhase !== undefined ? car.sirenPhase : game.police.flashPhase,
+          damage: car.damage,
+          broken: car.dead,
+        }),
+      });
+    }
+  }
+  for (const ped of game.peds.peds) {
+    if (ped.x > left - 30 && ped.x < right + 30 && ped.y > top - 30 && ped.y < bottom + 30) {
+      drawables.push({
+        y: ped.y,
+        draw: () => drawPerson(ctx, ped.x, ped.y, ped.angle, ped.look, ped.walkPhase, {}),
+      });
+    }
+  }
+  for (const enemy of game.combat.enemies) {
+    if (enemy.x > left - 30 && enemy.x < right + 30 && enemy.y > top - 30 && enemy.y < bottom + 30) {
+      drawables.push({
+        y: enemy.y,
+        draw: () => drawPerson(ctx, enemy.x, enemy.y, enemy.angle, enemy.look, enemy.walkPhase, { aiming: enemy.alerted }),
+      });
+    }
+  }
+  const player = game.player;
+  if (!player.inCar) {
+    drawables.push({
+      y: player.y,
+      draw: () => drawPerson(ctx, player.x, player.y, player.angle, player.look, player.walkPhase, { aiming: player.aiming }),
+    });
+  }
+  drawables.sort((a, b) => a.y - b.y);
+  for (const d of drawables) d.draw();
+
+  // Pickups, bullets, particles and floating text on top.
+  game.pickups.draw(ctx, game.time);
+  game.combat.draw(ctx);
+  game.effects.drawOver(ctx);
+
+  drawObjectiveBeacon(ctx, game, game.time);
+  ctx.restore();
+
+  drawEdgeArrow(ctx, game);
+}
+
+function drawGround(ctx, left, top, right, bottom, time) {
+  // Base grass.
   ctx.fillStyle = PALETTE.grass;
-  ctx.fillRect(b.x0, b.y0, b.x1 - b.x0, b.y1 - b.y0);
-
-  // Beach sand along the south edge, then the sea.
-  ctx.fillStyle = PALETTE.sand;
-  ctx.fillRect(b.x0, Math.max(b.y0, ROAD_CENTERS[7] + HALF_ROAD), b.x1 - b.x0, Math.min(b.y1, OCEAN_Y) - Math.max(b.y0, ROAD_CENTERS[7] + HALF_ROAD));
-  ctx.fillStyle = PALETTE.ocean;
-  ctx.fillRect(b.x0, Math.max(b.y0, OCEAN_Y), b.x1 - b.x0, b.y1 - Math.max(b.y0, OCEAN_Y));
-  drawWaves(ctx, b, time);
-
-  // ---- block ground: sidewalk, then the district's inner ground ----
+  ctx.fillRect(left, top, right - left, bottom - top);
+  // Block interiors: alternating mow stripes for texture.
   for (let col = 0; col < 8; col++) {
     for (let row = 0; row < 8; row++) {
-      const x = ROAD_CENTERS[col] + HALF_ROAD;
-      const y = ROAD_CENTERS[row] + HALF_ROAD;
+      const x = ROAD_CENTERS[col] + ROAD_WIDTH / 2;
+      const y = ROAD_CENTERS[row] + ROAD_WIDTH / 2;
       const w = BLOCK - ROAD_WIDTH;
       const h = BLOCK - ROAD_WIDTH;
-      if (x > b.x1 || x + w < b.x0 || y > b.y1 || y + h < b.y0) continue;
-      const key = districtKeyForBlock(col, row);
-      ctx.fillStyle = PALETTE.sidewalk;
+      if (x > right || x + w < left || y > bottom || y + h < top) continue;
+      ctx.fillStyle = (col + row) % 2 === 0 ? PALETTE.grass : PALETTE.grassDark;
       ctx.fillRect(x, y, w, h);
-      ctx.fillStyle = PALETTE.sidewalkEdge;
-      ctx.fillRect(x, y, w, 4);
-      ctx.fillRect(x, y, 4, h);
-      ctx.fillRect(x, y + h - 4, w, 4);
-      ctx.fillRect(x + w - 4, y, 4, h);
-      const inner = 26;
-      if (key === 'park') {
-        ctx.fillStyle = PALETTE.parkGrass;
-        ctx.fillRect(x + inner, y + inner, w - inner * 2, h - inner * 2);
-        // Crossing paths.
-        ctx.fillStyle = PALETTE.sidewalk;
-        ctx.fillRect(x + w / 2 - 8, y + inner, 16, h - inner * 2);
-        ctx.fillRect(x + inner, y + h / 2 - 8, w - inner * 2, 16);
-      } else if (key === 'beach') {
-        ctx.fillStyle = PALETTE.sand;
-        ctx.fillRect(x + inner, y + inner, w - inner * 2, h - inner * 2);
-      } else if (key === 'downtown' || key === 'market') {
-        ctx.fillStyle = '#bdb5a4';
-        ctx.fillRect(x + inner, y + inner, w - inner * 2, h - inner * 2);
-      } else {
-        ctx.fillStyle = PALETTE.grass;
-        ctx.fillRect(x + inner, y + inner, w - inner * 2, h - inner * 2);
-      }
+      // Sidewalk border around the block.
+      ctx.fillStyle = PALETTE.sidewalk;
+      ctx.fillRect(x, y, w, 10);
+      ctx.fillRect(x, y + h - 10, w, 10);
+      ctx.fillRect(x, y, 10, h);
+      ctx.fillRect(x + w - 10, y, 10, h);
     }
   }
-
-  // ---- roads ----
-  ctx.fillStyle = PALETTE.asphalt;
-  for (const c of ROAD_CENTERS) {
-    if (c + HALF_ROAD >= b.x0 && c - HALF_ROAD <= b.x1) ctx.fillRect(c - HALF_ROAD, b.y0, ROAD_WIDTH, b.y1 - b.y0);
-    if (c + HALF_ROAD >= b.y0 && c - HALF_ROAD <= b.y1) ctx.fillRect(b.x0, c - HALF_ROAD, b.x1 - b.x0, ROAD_WIDTH);
-  }
-  // Centre dashes and crosswalks.
-  ctx.fillStyle = PALETTE.centerLine;
-  for (const c of ROAD_CENTERS) {
-    if (c >= b.x0 - 10 && c <= b.x1 + 10) {
-      for (let y = Math.floor(b.y0 / 64) * 64; y < b.y1; y += 64) {
-        if (onCrossStreet(y)) continue;
-        ctx.fillRect(c - 2, y, 4, 30);
-      }
-    }
-    if (c >= b.y0 - 10 && c <= b.y1 + 10) {
-      for (let x = Math.floor(b.x0 / 64) * 64; x < b.x1; x += 64) {
-        if (onCrossStreet(x)) continue;
-        ctx.fillRect(x, c - 2, 30, 4);
-      }
-    }
-  }
-  ctx.fillStyle = PALETTE.crosswalk;
-  for (const cx of ROAD_CENTERS) {
-    for (const cy of ROAD_CENTERS) {
-      if (cx < b.x0 - 60 || cx > b.x1 + 60 || cy < b.y0 - 60 || cy > b.y1 + 60) continue;
-      for (let i = -2; i <= 2; i++) {
-        ctx.fillRect(cx + i * 16 - 5, cy - HALF_ROAD + 8, 10, 12);
-        ctx.fillRect(cx + i * 16 - 5, cy + HALF_ROAD - 20, 10, 12);
-      }
-    }
-  }
-
-  // ---- pier planks over the water ----
-  for (const prop of city.benches) {
-    if (prop.kind !== 'pier') continue;
-    ctx.fillStyle = '#a88155';
-    ctx.fillRect(prop.x, prop.y, prop.w, prop.h);
-    ctx.fillStyle = '#8a6b3d';
-    for (let y = prop.y + 12; y < prop.y + prop.h; y += 16) ctx.fillRect(prop.x, y, prop.w, 2);
-  }
-
-  // ---- mission markers on the ground ----
-  drawGroundMarkers(ctx, game, time);
-
-  // ---- props: ponds, benches, crates, cranes ----
-  for (const prop of city.benches) {
-    if (prop.kind === 'pier') continue;
-    if (!camera.visible(prop.x, prop.y, 80)) continue;
-    drawProp(ctx, prop);
-  }
-
-  // ---- buildings, painter-sorted ----
-  const visible = buildingsInView(city, b.x0, b.y0, b.x1, b.y1).sort((a, c2) => a.y - c2.y);
-  for (const building of visible) drawBuilding(ctx, building, time);
-
-  // ---- trees and lamps ----
-  for (const t of city.trees) {
-    if (!camera.visible(t.x, t.y, 30)) continue;
-    drawTree(ctx, t, time);
-  }
-  for (const lamp of city.lamps) {
-    if (!camera.visible(lamp.x, lamp.y, 10)) continue;
-    drawLamp(ctx, lamp);
-  }
-
-  // ---- pickups ----
-  for (const p of game.pickups.pickups) {
-    if (!p.active || !camera.visible(p.x, p.y, 30)) continue;
-    const info = pickupKindInfo(p.kind);
-    const bobY = Math.sin(p.bob) * 3;
-    ctx.fillStyle = 'rgba(0,0,0,0.25)';
-    ctx.beginPath();
-    ctx.ellipse(p.x, p.y + 8, 10, 4, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = info.color;
-    ctx.beginPath();
-    ctx.arc(p.x, p.y + bobY, 11, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(255,255,255,0.8)';
-    ctx.lineWidth = 2;
-    ctx.stroke();
-    ctx.fillStyle = '#ffffff';
-    ctx.font = 'bold 13px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText(info.icon, p.x, p.y + bobY + 5);
-  }
-
-  // ---- vehicles, sorted so nearer ones overlap correctly ----
-  const cars = game.allCars.slice().sort((a, c2) => a.y - c2.y);
-  for (const car of cars) {
-    if (!camera.visible(car.x, car.y, 70)) continue;
-    drawVehicle(ctx, car.x, car.y, car.angle, car.def, car.color, {
-      steer: car.steer,
-      police: !!car.def.police,
-      taxi: !!car.def.taxi,
-      time,
-      damage: 100 - (car.health / car.maxHealth) * 100,
-      wrecked: car.wrecked,
-    });
-  }
-
-  // ---- pedestrians and goons ----
-  for (const ped of game.peds.peds) {
-    if (!camera.visible(ped.x, ped.y, 30)) continue;
-    drawPerson(ctx, ped.x, ped.y, ped.angle, ped.look, ped.walkPhase, { down: ped.state === 'down' });
-  }
-  for (const e of game.combat.enemies) {
-    if (!camera.visible(e.x, e.y, 30)) continue;
-    drawPerson(ctx, e.x, e.y, e.angle, e.look, e.walkPhase, { weapon: e.health > 0, down: e.health <= 0 });
-  }
-
-  // ---- the player on foot ----
-  const player = game.player;
-  if (!player.inCar && !player.dead) {
-    drawPerson(ctx, player.x, player.y, player.angle, player.look, player.walkPhase, {
-      weapon: player.weapon !== 'fists',
-    });
-  }
-
-  // ---- bullets as bright tracers ----
-  ctx.strokeStyle = '#ffe9a3';
-  ctx.lineWidth = 2;
-  for (const bullet of game.combat.bullets) {
-    ctx.beginPath();
-    ctx.moveTo(bullet.x, bullet.y);
-    ctx.lineTo(bullet.x - bullet.vx * 0.016, bullet.y - bullet.vy * 0.016);
-    ctx.stroke();
-  }
-
-  // ---- particles, skids, floaters ----
-  game.effects.drawWorld(ctx);
-
-  // ---- objective beacon ----
-  drawObjectiveBeacon(ctx, game, time);
+  // Beach sand below the last road.
+  const sandTop = ROAD_CENTERS[8] + ROAD_WIDTH / 2;
+  ctx.fillStyle = PALETTE.sand;
+  ctx.fillRect(left, Math.max(top, sandTop), right - left, Math.max(0, Math.min(bottom, OCEAN_Y) - Math.max(top, sandTop)));
 }
 
 function onCrossStreet(v) {
   for (const c of ROAD_CENTERS) {
-    if (Math.abs(v - c) < HALF_ROAD + 20) return true;
+    if (Math.abs(v - c) <= ROAD_WIDTH / 2 + 4) return true;
   }
   return false;
 }
 
-function drawWaves(ctx, b, time) {
-  if (b.y1 < OCEAN_Y) return;
-  ctx.strokeStyle = 'rgba(255,255,255,0.35)';
-  ctx.lineWidth = 2;
-  const y0 = Math.max(b.y0, OCEAN_Y + 8);
-  for (let y = Math.floor(y0 / 46) * 46; y < b.y1; y += 46) {
-    ctx.beginPath();
-    for (let x = Math.floor(b.x0 / 30) * 30; x < b.x1; x += 30) {
-      const yy = y + Math.sin(x * 0.02 + time * 1.4 + y) * 3;
-      if (x === Math.floor(b.x0 / 30) * 30) ctx.moveTo(x, yy);
-      else ctx.lineTo(x, yy);
-    }
-    ctx.stroke();
+function drawRoads(ctx, left, top, right, bottom) {
+  ctx.fillStyle = PALETTE.asphalt;
+  for (const c of ROAD_CENTERS) {
+    ctx.fillRect(left, c - ROAD_WIDTH / 2, right - left, ROAD_WIDTH);
+    ctx.fillRect(c - ROAD_WIDTH / 2, top, ROAD_WIDTH, bottom - top);
   }
-  // Foam at the waterline.
+  // Centre dashes.
+  ctx.fillStyle = PALETTE.centerLine;
+  for (const c of ROAD_CENTERS) {
+    for (let v = 0; v < WORLD; v += 64) {
+      if (!onCrossStreet(v)) {
+        if (v > left - 32 && v < right + 32) ctx.fillRect(v, c - 2, 32, 4);
+        if (v > top - 32 && v < bottom + 32) ctx.fillRect(c - 2, v, 4, 32);
+      }
+    }
+  }
+  // Lane lines.
+  ctx.fillStyle = PALETTE.laneLine;
+  for (const c of ROAD_CENTERS) {
+    for (const off of [-21, 21]) {
+      for (let v = 0; v < WORLD; v += 48) {
+        if (!onCrossStreet(v)) {
+          if (v > left - 24 && v < right + 24) ctx.fillRect(v, c + off - 1, 24, 2);
+          if (v > top - 24 && v < bottom + 24) ctx.fillRect(c + off - 1, v, 2, 24);
+        }
+      }
+    }
+  }
+  // Crosswalks at intersections.
+  ctx.fillStyle = PALETTE.crosswalk;
+  for (const cx of ROAD_CENTERS) {
+    for (const cy of ROAD_CENTERS) {
+      if (cx < left - 60 || cx > right + 60 || cy < top - 60 || cy > bottom + 60) continue;
+      for (let i = -3; i <= 3; i++) {
+        ctx.fillRect(cx + i * 11 - 3, cy - ROAD_WIDTH / 2 + 6, 6, 12);
+        ctx.fillRect(cx + i * 11 - 3, cy + ROAD_WIDTH / 2 - 18, 6, 12);
+        ctx.fillRect(cx - ROAD_WIDTH / 2 + 6, cy + i * 11 - 3, 12, 6);
+        ctx.fillRect(cx + ROAD_WIDTH / 2 - 18, cy + i * 11 - 3, 12, 6);
+      }
+    }
+  }
+}
+
+function drawOcean(ctx, left, top, right, bottom, time) {
+  if (bottom < OCEAN_Y) return;
+  const grad = ctx.createLinearGradient(0, OCEAN_Y, 0, WORLD);
+  grad.addColorStop(0, PALETTE.ocean);
+  grad.addColorStop(1, PALETTE.oceanDeep);
+  ctx.fillStyle = grad;
+  ctx.fillRect(left, OCEAN_Y, right - left, bottom - OCEAN_Y);
+  // Foam line and drifting wave streaks.
   ctx.fillStyle = PALETTE.foam;
-  for (let x = Math.floor(b.x0 / 40) * 40; x < b.x1; x += 40) {
-    const wobble = Math.sin(x * 0.05 + time * 1.8) * 3;
-    ctx.fillRect(x, OCEAN_Y + wobble, 26, 3);
+  const waveOff = Math.sin(time * 1.2) * 4;
+  ctx.fillRect(left, OCEAN_Y + waveOff, right - left, 4);
+  ctx.fillStyle = 'rgba(255,255,255,0.25)';
+  for (let x = 0; x < WORLD; x += 170) {
+    const y = OCEAN_Y + 40 + ((x * 7) % 90);
+    const wobble = Math.sin(time * 0.9 + x * 0.02) * 8;
+    if (x > left - 80 && x < right + 80 && y > top && y < bottom) {
+      ctx.fillRect(x + wobble, y, 60, 3);
+    }
+  }
+  // The pier.
+  ctx.fillStyle = '#8a6b4a';
+  ctx.fillRect(1780 - 30, OCEAN_Y - 40, 60, 120);
+  ctx.fillStyle = '#6d5439';
+  for (let y = OCEAN_Y - 40; y < OCEAN_Y + 80; y += 16) ctx.fillRect(1780 - 30, y, 60, 3);
+}
+
+function drawObjectiveBeacon(ctx, game, time) {
+  const obj = game.missions.objectivePoint;
+  if (!obj) return;
+  const bob = Math.sin(time * 3) * 6;
+  const beamH = 130;
+  const grad = ctx.createLinearGradient(0, obj.y - beamH + bob, 0, obj.y);
+  grad.addColorStop(0, 'rgba(255,217,77,0)');
+  grad.addColorStop(1, 'rgba(255,217,77,0.4)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(obj.x - 8, obj.y - beamH + bob, 16, beamH);
+  ctx.fillStyle = '#ffd94d';
+  ctx.beginPath();
+  ctx.moveTo(obj.x, obj.y - beamH + bob - 14);
+  ctx.lineTo(obj.x - 10, obj.y - beamH + bob - 30);
+  ctx.lineTo(obj.x + 10, obj.y - beamH + bob - 30);
+  ctx.closePath();
+  ctx.fill();
+}
+
+// Off-screen objective arrow, drawn in screen space at the viewport edge.
+function drawEdgeArrow(ctx, game) {
+  const obj = game.missions.objectivePoint;
+  if (!obj) return;
+  const cam = game.camera;
+  const sx = (obj.x - cam.x) * cam.zoom + game.viewW / 2;
+  const sy = (obj.y - cam.y) * cam.zoom + game.viewH / 2;
+  if (sx < 30 || sx > game.viewW - 30 || sy < 30 || sy > game.viewH - 30) {
+    const cx = clamp(sx, 40, game.viewW - 40);
+    const cy = clamp(sy, 50, game.viewH - 40);
+    const angle = Math.atan2(sy - game.viewH / 2, sx - game.viewW / 2);
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(angle);
+    ctx.fillStyle = '#ffd94d';
+    ctx.beginPath();
+    ctx.moveTo(16, 0);
+    ctx.lineTo(-8, -10);
+    ctx.lineTo(-8, 10);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
   }
 }
 
 function drawGroundMarkers(ctx, game, time) {
-  const pulse = 0.5 + Math.sin(time * 3.2) * 0.5;
-  const ring = (x, y, radius, color) => {
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 3;
-    ctx.globalAlpha = 0.45 + pulse * 0.5;
-    ctx.beginPath();
-    ctx.arc(x, y, radius + pulse * 5, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.globalAlpha = 0.16 + pulse * 0.1;
-    ctx.fillStyle = color;
-    ctx.beginPath();
-    ctx.arc(x, y, radius, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.globalAlpha = 1;
-  };
-  // Garage: green when a story job waits.
-  if (game.missions.canStartStory(game)) ring(PLACES.garage.x, PLACES.garage.y, 46, '#7ddb6a');
-  // Paint shop: pink when wanted.
-  if (game.police.wanted > 0) ring(PLACES.paintShop.x, PLACES.paintShop.y, 40, '#e87a9a');
-  // Courier spots: gold when free.
-  if (!game.missions.active && !game.missions.courier) {
-    for (const spot of [{ x: PLACES.bazaar.x, y: PLACES.bazaar.y }, { x: PLACES.arena.x, y: PLACES.arena.y }, { x: PLACES.hospital.x, y: PLACES.hospital.y }, { x: PLACES.depot.x, y: PLACES.depot.y }]) {
-      ring(spot.x, spot.y, 30, '#f2c14e');
-    }
-  }
+  const pulse = 0.6 + 0.4 * Math.sin(time * 4);
+  // Garage marker.
+  markerRing(ctx, 1180, 300, 46, 'rgba(93,165,106,' + (0.35 + 0.3 * pulse) + ')');
+  // Paint shop marker.
+  markerRing(ctx, 2580, 1380, 40, 'rgba(224,168,60,' + (0.3 + 0.3 * pulse) + ')');
+  // Hospital marker.
+  markerRing(ctx, 580, 980, 34, 'rgba(232,76,61,' + (0.25 + 0.25 * pulse) + ')');
 }
 
-function drawObjectiveBeacon(ctx, game, time) {
-  const obj = game.missions.activeObjective(game);
-  if (obj.x === null || obj.x === undefined) return;
-  const pulse = 0.5 + Math.sin(time * 4) * 0.5;
-  // A beam of light the player can see from blocks away.
-  const grad = ctx.createLinearGradient(obj.x, obj.y - 220, obj.x, obj.y);
-  grad.addColorStop(0, 'rgba(255,217,74,0)');
-  grad.addColorStop(1, 'rgba(255,217,74,' + (0.35 + pulse * 0.25).toFixed(3) + ')');
-  ctx.fillStyle = grad;
-  ctx.fillRect(obj.x - 8, obj.y - 220, 16, 220);
-  // Down arrow.
-  const ay = obj.y - 46 - pulse * 8;
-  ctx.fillStyle = '#ffd94a';
-  ctx.strokeStyle = 'rgba(0,0,0,0.4)';
-  ctx.lineWidth = 2;
+function markerRing(ctx, x, y, r, color) {
+  ctx.fillStyle = color;
   ctx.beginPath();
-  ctx.moveTo(obj.x, ay + 16);
-  ctx.lineTo(obj.x - 12, ay);
-  ctx.lineTo(obj.x - 4, ay);
-  ctx.lineTo(obj.x - 4, ay - 12);
-  ctx.lineTo(obj.x + 4, ay - 12);
-  ctx.lineTo(obj.x + 4, ay);
-  ctx.lineTo(obj.x + 12, ay);
-  ctx.closePath();
+  ctx.arc(x, y, r, 0, Math.PI * 2);
   ctx.fill();
-  ctx.stroke();
-  // Ground ring.
-  ctx.strokeStyle = '#ffd94a';
-  ctx.lineWidth = 3;
-  ctx.beginPath();
-  ctx.arc(obj.x, obj.y, 26 + pulse * 6, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+  ctx.lineWidth = 2;
   ctx.stroke();
 }

@@ -1,20 +1,19 @@
-// San Cielo Heat — the city itself: a fixed-seed grid of roads, blocks,
-// buildings, trees and landmarks, plus the collision and road queries
-// every moving system asks.
+// San Cielo Heat — the city generator: a fixed-seed grid of roads, blocks,
+// buildings, trees and landmarks, plus the collision and road queries the
+// other systems need. The same seed builds the same city on every load.
 
-import { BLOCK, CITY_SEED, DISTRICTS, LANDMARKS, OCEAN_Y, PALETTE, ROAD_CENTERS, ROAD_WIDTH, WORLD, districtKeyForBlock } from './config.js';
-import { circleRectPush, clamp, makeRng, pointInRect } from './util.js';
+import {
+  BLOCK, CITY_SEED, DISTRICTS, LANDMARKS, OCEAN_Y, PALETTE, ROAD_CENTERS, ROAD_WIDTH, WORLD,
+  districtKeyForBlock,
+} from './config.js';
+import { circleRectPush, clamp, makeRng } from './util.js';
 
-const HALF_ROAD = ROAD_WIDTH / 2;
-const GRID_CELL = 200;
+const GRID_CELL = 400;
 
 function blockRect(col, row) {
-  return {
-    x: ROAD_CENTERS[col] + HALF_ROAD,
-    y: ROAD_CENTERS[row] + HALF_ROAD,
-    w: BLOCK - ROAD_WIDTH,
-    h: BLOCK - ROAD_WIDTH,
-  };
+  const x0 = ROAD_CENTERS[col] + ROAD_WIDTH / 2;
+  const y0 = ROAD_CENTERS[row] + ROAD_WIDTH / 2;
+  return { x: x0, y: y0, w: BLOCK - ROAD_WIDTH, h: BLOCK - ROAD_WIDTH };
 }
 
 export function buildCity() {
@@ -23,54 +22,43 @@ export function buildCity() {
     buildings: [],
     trees: [],
     lamps: [],
-    benches: [],
-    landmarks: [],
-    roadCenters: ROAD_CENTERS.slice(),
+    props: [],
+    colliders: [],
     grid: new Map(),
+    landmarks: LANDMARKS,
   };
 
-  // ---- buildings, one recipe per district ----
   for (let col = 0; col < 8; col++) {
     for (let row = 0; row < 8; row++) {
-      const key = districtKeyForBlock(col, row);
       const rect = blockRect(col, row);
+      const key = districtKeyForBlock(col, row);
       const landmark = LANDMARKS.find((l) => l.col === col && l.row === row);
       if (landmark) {
         buildLandmark(city, landmark, rect, rng);
         continue;
       }
-      if (key === 'park') {
-        buildPark(city, rect, rng);
-      } else if (key === 'beach') {
-        buildBeach(city, rect, rng);
-      } else if (key === 'downtown') {
-        buildTowers(city, rect, rng);
-      } else if (key === 'harbor') {
-        buildWarehouses(city, rect, rng);
-      } else if (key === 'market') {
-        buildShops(city, rect, rng);
-      } else if (key === 'residential') {
-        buildHouses(city, rect, rng);
-      } else {
-        buildApartments(city, rect, rng);
-      }
+      if (key === 'downtown') buildTowers(city, rect, rng);
+      else if (key === 'harbor') buildWarehouses(city, rect, rng);
+      else if (key === 'park') buildPark(city, rect, rng);
+      else if (key === 'market') buildShops(city, rect, rng);
+      else if (key === 'residential') buildHouses(city, rect, rng);
+      else if (key === 'beach') buildBeach(city, rect, rng);
+      else buildApartments(city, rect, rng);
+      scatterTrees(city, rect, rng, key === 'park' ? 14 : 5, key === 'beach' ? 'palm' : 'tree');
     }
   }
 
-  // ---- street lamps at every intersection corner ----
+  // Street lamps at every intersection corner.
   for (const cx of ROAD_CENTERS) {
     for (const cy of ROAD_CENTERS) {
-      city.lamps.push({ x: cx - HALF_ROAD - 8, y: cy - HALF_ROAD - 8 });
-      city.lamps.push({ x: cx + HALF_ROAD + 8, y: cy + HALF_ROAD + 8 });
+      city.lamps.push({ x: cx - ROAD_WIDTH / 2 - 6, y: cy - ROAD_WIDTH / 2 - 6 });
+      city.lamps.push({ x: cx + ROAD_WIDTH / 2 + 6, y: cy + ROAD_WIDTH / 2 + 6 });
     }
   }
-
-  // ---- spatial hash for collision queries ----
-  for (const b of city.buildings) indexRect(city.grid, b, { kind: 'building', ref: b });
-  for (const t of city.trees) {
-    indexRect(city.grid, { x: t.x - 8, y: t.y - 8, w: 16, h: 16 }, { kind: 'tree', ref: t });
+  // Buoys bobbing in the bay.
+  for (let i = 0; i < 9; i++) {
+    city.props.push({ kind: 'buoy', x: 260 + i * 380 + rng.range(-40, 40), y: OCEAN_Y + 50 + rng.range(0, 80) });
   }
-
   return city;
 }
 
@@ -82,26 +70,25 @@ function indexRect(grid, rect, entry) {
   for (let gx = x0; gx <= x1; gx++) {
     for (let gy = y0; gy <= y1; gy++) {
       const key = gx + ',' + gy;
-      let list = grid.get(key);
-      if (!list) { list = []; grid.set(key, list); }
-      list.push(entry);
+      if (!grid.has(key)) grid.set(key, []);
+      grid.get(key).push(entry);
     }
   }
 }
 
 function nearbyEntries(city, x, y, radius) {
   const out = [];
+  const seen = new Set();
   const x0 = Math.floor((x - radius) / GRID_CELL);
   const x1 = Math.floor((x + radius) / GRID_CELL);
   const y0 = Math.floor((y - radius) / GRID_CELL);
   const y1 = Math.floor((y + radius) / GRID_CELL);
-  const seen = new Set();
   for (let gx = x0; gx <= x1; gx++) {
     for (let gy = y0; gy <= y1; gy++) {
       const list = city.grid.get(gx + ',' + gy);
       if (!list) continue;
-      for (const e of list) {
-        if (!seen.has(e.ref)) { seen.add(e.ref); out.push(e); }
+      for (const entry of list) {
+        if (!seen.has(entry)) { seen.add(entry); out.push(entry); }
       }
     }
   }
@@ -109,179 +96,164 @@ function nearbyEntries(city, x, y, radius) {
 }
 
 function addBuilding(city, x, y, w, h, opts) {
-  const b = {
-    x, y, w, h,
-    hgt: opts.hgt || 18,
-    wall: opts.wall,
-    roof: opts.roof || opts.wall,
-    kind: opts.kind || 'block',
-    district: opts.district,
-    name: opts.name || null,
-    awning: opts.awning || null,
-    windows: opts.windows !== false,
-  };
+  const b = { x, y, w, h, kind: opts.kind || 'block', roof: opts.roof, glass: opts.glass, awning: opts.awning, label: opts.label || null };
   city.buildings.push(b);
+  const collider = { x: x - 2, y: y - 2, w: w + 4, h: h + 4 };
+  city.colliders.push(collider);
+  indexRect(city.grid, collider, collider);
   return b;
 }
 
 function buildTowers(city, rect, rng) {
-  const n = rng.int(1, 2);
-  for (let i = 0; i < n; i++) {
-    const w = rng.range(90, 150);
-    const h = rng.range(90, 150);
-    const x = rect.x + 20 + (i * (rect.w - 40 - w)) / Math.max(1, n - 1) + (n === 1 ? (rect.w - 40 - w) / 2 : 0);
-    const y = rect.y + (rect.h - h) / 2 + rng.range(-20, 20);
-    addBuilding(city, x, y, w, h, {
-      hgt: rng.range(60, 120),
-      wall: rng.pick(PALETTE.towerGlass),
-      roof: rng.pick(PALETTE.towerRoof),
-      kind: 'tower',
-      district: 'downtown',
-    });
+  const cols = 2;
+  const rows = 2;
+  const cw = rect.w / cols;
+  const ch = rect.h / rows;
+  for (let i = 0; i < cols; i++) {
+    for (let j = 0; j < rows; j++) {
+      const w = cw * rng.range(0.62, 0.8);
+      const h = ch * rng.range(0.62, 0.8);
+      addBuilding(city,
+        rect.x + i * cw + (cw - w) / 2, rect.y + j * ch + (ch - h) / 2, w, h,
+        { kind: 'tower', roof: rng.pick(PALETTE.towerRoof), glass: rng.pick(PALETTE.towerGlass) });
+    }
   }
-  scatterTrees(city, rect, rng, 2, 'leaf');
 }
 
 function buildWarehouses(city, rect, rng) {
-  const w = rect.w - 50;
-  const h = rng.range(90, 130);
-  addBuilding(city, rect.x + 25, rect.y + (rect.h - h) / 2, w, h, {
-    hgt: 26,
-    wall: rng.pick(PALETTE.warehouse),
-    kind: 'warehouse',
-    district: 'harbor',
-    windows: false,
-  });
-  for (let i = 0; i < 3; i++) {
-    city.benches.push({ x: rect.x + 30 + i * 90, y: rect.y + rect.h - 26, kind: 'crate' });
+  const w = rect.w * rng.range(0.7, 0.84);
+  const h = rect.h * rng.range(0.5, 0.62);
+  addBuilding(city, rect.x + (rect.w - w) / 2, rect.y + 18, w, h,
+    { kind: 'warehouse', roof: rng.pick(PALETTE.warehouse) });
+  for (let i = 0; i < 5; i++) {
+    city.props.push({
+      kind: rng.chance(0.5) ? 'crate' : 'barrel',
+      x: rect.x + rng.range(30, rect.w - 30), y: rect.y + rect.h - rng.range(20, 70),
+      color: rng.pick(['#c2573f', '#4b8ad9', '#5da56a']),
+    });
   }
 }
 
 function buildShops(city, rect, rng) {
-  const n = rng.int(3, 4);
-  const gap = 14;
-  const w = (rect.w - 30 - gap * (n - 1)) / n;
+  const n = 3;
+  const cw = rect.w / n;
   for (let i = 0; i < n; i++) {
-    const h = rng.range(70, 110);
-    addBuilding(city, rect.x + 15 + i * (w + gap), rect.y + 30, w, h, {
-      hgt: 20,
-      wall: rng.pick(PALETTE.shopWall),
-      kind: 'shop',
-      district: 'market',
-      awning: rng.pick(PALETTE.awning),
-    });
+    const w = cw * rng.range(0.78, 0.9);
+    const h = rect.h * rng.range(0.55, 0.7);
+    addBuilding(city, rect.x + i * cw + (cw - w) / 2, rect.y + (rect.h - h) / 2, w, h,
+      { kind: 'shop', roof: rng.pick(PALETTE.shopWall), awning: rng.pick(PALETTE.awning) });
   }
-  scatterTrees(city, { x: rect.x, y: rect.y + rect.h - 60, w: rect.w, h: 50 }, rng, 3, 'palm');
 }
 
 function buildHouses(city, rect, rng) {
-  for (let ix = 0; ix < 2; ix++) {
-    for (let iy = 0; iy < 2; iy++) {
-      if (rng.chance(0.12)) continue; // an empty lot keeps the block airy
-      const w = rng.range(70, 95);
-      const h = rng.range(60, 85);
-      addBuilding(city, rect.x + 24 + ix * (rect.w / 2) + rng.range(0, 20), rect.y + 24 + iy * (rect.h / 2) + rng.range(0, 20), w, h, {
-        hgt: 16,
-        wall: rng.pick(PALETTE.houseWall),
-        roof: rng.pick(['#c96f4a', '#b8573f', '#8a6f52', '#a85f43']),
-        kind: 'house',
-        district: 'residential',
-      });
+  const cols = 3;
+  const rows = 2;
+  const cw = rect.w / cols;
+  const ch = rect.h / rows;
+  for (let i = 0; i < cols; i++) {
+    for (let j = 0; j < rows; j++) {
+      const w = cw * rng.range(0.55, 0.68);
+      const h = ch * rng.range(0.55, 0.68);
+      addBuilding(city,
+        rect.x + i * cw + (cw - w) / 2, rect.y + j * ch + (ch - h) / 2, w, h,
+        { kind: 'house', roof: rng.pick(PALETTE.houseWall) });
     }
   }
-  scatterTrees(city, rect, rng, 4, 'leaf');
 }
 
 function buildApartments(city, rect, rng) {
-  const n = rng.int(2, 3);
-  for (let i = 0; i < n; i++) {
-    const w = rng.range(80, 120);
-    const h = rng.range(80, 120);
-    addBuilding(city, rect.x + 18 + (i % 2) * (rect.w / 2), rect.y + 18 + Math.floor(i / 2) * (rect.h / 2), w, h, {
-      hgt: rng.range(28, 48),
-      wall: rng.pick(PALETTE.apartment),
-      kind: 'apartment',
-      district: 'midtown',
-    });
-  }
-  scatterTrees(city, rect, rng, 2, 'leaf');
+  const w = rect.w * rng.range(0.6, 0.72);
+  const h = rect.h * rng.range(0.6, 0.72);
+  addBuilding(city, rect.x + (rect.w - w) / 2, rect.y + (rect.h - h) / 2, w, h,
+    { kind: 'apartment', roof: rng.pick(PALETTE.apartment), glass: rng.pick(PALETTE.towerGlass) });
+  const w2 = rect.w * 0.3;
+  const h2 = rect.h * 0.3;
+  addBuilding(city, rect.x + 14, rect.y + 14, w2, h2,
+    { kind: 'apartment', roof: rng.pick(PALETTE.apartment) });
 }
 
 function buildPark(city, rect, rng) {
-  // A pond in the middle, paths implied by the ground, trees everywhere.
-  const pond = { x: rect.x + rect.w / 2 - 55, y: rect.y + rect.h / 2 - 40, w: 110, h: 80, kind: 'pond' };
-  city.benches.push(pond);
-  scatterTrees(city, rect, rng, 16, 'leaf');
+  city.props.push({ kind: 'fountain', x: rect.x + rect.w / 2, y: rect.y + rect.h / 2 });
   for (let i = 0; i < 4; i++) {
-    city.benches.push({ x: rect.x + 30 + rng.range(0, rect.w - 60), y: rect.y + 30 + rng.range(0, rect.h - 60), kind: 'bench' });
+    city.props.push({
+      kind: 'bench',
+      x: rect.x + rect.w / 2 + (i % 2 === 0 ? -70 : 70),
+      y: rect.y + rect.h / 2 + (i < 2 ? -60 : 60),
+    });
   }
 }
 
 function buildBeach(city, rect, rng) {
-  scatterTrees(city, rect, rng, 7, 'palm');
-  for (let i = 0; i < 2; i++) {
-    addBuilding(city, rect.x + 30 + i * 130, rect.y + 40, 70, 55, {
-      hgt: 14,
-      wall: rng.pick(PALETTE.houseWall),
-      kind: 'shack',
-      district: 'beach',
-      awning: rng.pick(PALETTE.awning),
-    });
-  }
+  // Boardwalk strip at the top of the beach block, open sand below.
+  const w = rect.w * 0.5;
+  addBuilding(city, rect.x + (rect.w - w) / 2, rect.y + 8, w, 34,
+    { kind: 'shop', roof: rng.pick(PALETTE.shopWall), awning: rng.pick(PALETTE.awning) });
 }
 
 function scatterTrees(city, rect, rng, count, kind) {
   for (let i = 0; i < count; i++) {
-    const x = rect.x + rng.range(14, rect.w - 14);
-    const y = rect.y + rng.range(14, rect.h - 14);
-    if (city.buildings.some((b) => pointInRect(x, y, { x: b.x - 12, y: b.y - 12, w: b.w + 24, h: b.h + 24 }))) continue;
-    city.trees.push({ x, y, r: kind === 'palm' ? rng.range(9, 12) : rng.range(11, 16), kind, sway: rng.range(0, Math.PI * 2) });
+    const x = rect.x + rng.range(16, rect.w - 16);
+    const y = rect.y + rng.range(16, rect.h - 16);
+    // Keep trees out of building footprints.
+    let blocked = false;
+    for (const c of city.colliders) {
+      if (x > c.x - 14 && x < c.x + c.w + 14 && y > c.y - 14 && y < c.y + c.h + 14) { blocked = true; break; }
+    }
+    if (blocked) continue;
+    city.trees.push({ x, y, kind, r: kind === 'palm' ? 10 : rng.range(9, 14), color: kind === 'palm' ? PALETTE.palm : rng.pick([PALETTE.tree, PALETTE.treeDark]) });
   }
 }
 
 function buildLandmark(city, landmark, rect, rng) {
   const cx = rect.x + rect.w / 2;
   const cy = rect.y + rect.h / 2;
-  let b = null;
-  if (landmark.kind === 'tower') {
-    b = addBuilding(city, cx - 70, cy - 70, 140, 140, { hgt: 150, wall: PALETTE.towerGlass[0], roof: '#f2e8d0', kind: 'tower', district: 'downtown', name: landmark.name });
-  } else if (landmark.kind === 'hotel') {
-    b = addBuilding(city, cx - 90, cy - 55, 180, 110, { hgt: 70, wall: '#f2e2c4', roof: '#e8d3ac', kind: 'hotel', district: 'downtown', name: landmark.name });
+  if (landmark.kind === 'tower' || landmark.kind === 'hotel') {
+    const w = rect.w * 0.55;
+    const h = rect.h * 0.55;
+    addBuilding(city, cx - w / 2, cy - h / 2, w, h,
+      { kind: landmark.kind, roof: PALETTE.towerRoof[0], glass: PALETTE.towerGlass[0], label: landmark.name });
   } else if (landmark.kind === 'arena') {
-    b = addBuilding(city, cx - 110, cy - 85, 220, 170, { hgt: 34, wall: '#d9c9a8', roof: '#c4b193', kind: 'arena', district: 'midtown', name: landmark.name, windows: false });
+    const w = rect.w * 0.8;
+    const h = rect.h * 0.66;
+    addBuilding(city, cx - w / 2, cy - h / 2, w, h,
+      { kind: 'arena', roof: '#d8c9a8', label: landmark.name });
   } else if (landmark.kind === 'cranes') {
-    b = addBuilding(city, cx - 100, cy - 60, 200, 120, { hgt: 24, wall: PALETTE.warehouse[1], kind: 'warehouse', district: 'harbor', name: landmark.name, windows: false });
-    city.benches.push({ x: cx - 120, y: cy - 90, kind: 'crane' });
-    city.benches.push({ x: cx + 90, y: cy - 90, kind: 'crane' });
+    addBuilding(city, rect.x + 20, rect.y + 20, rect.w * 0.45, rect.h * 0.5,
+      { kind: 'warehouse', roof: PALETTE.warehouse[0], label: 'Harbor' });
+    for (let i = 0; i < 3; i++) {
+      city.props.push({ kind: 'crane', x: rect.x + rect.w * (0.62 + i * 0.14), y: rect.y + rect.h * 0.55 });
+    }
   } else if (landmark.kind === 'bazaar') {
-    b = addBuilding(city, cx - 110, cy - 70, 220, 140, { hgt: 24, wall: '#ecd9b4', roof: '#d9b878', kind: 'bazaar', district: 'market', name: landmark.name, awning: '#d95f4b' });
+    buildShops(city, rect, rng);
+    city.props.push({ kind: 'fountain', x: cx, y: cy });
   } else if (landmark.kind === 'fort') {
-    b = addBuilding(city, cx - 80, cy - 60, 160, 120, { hgt: 30, wall: '#cbb894', roof: '#b39d78', kind: 'fort', district: 'beach', name: landmark.name, windows: false });
+    const w = rect.w * 0.62;
+    const h = rect.h * 0.5;
+    addBuilding(city, cx - w / 2, cy - h / 2, w, h,
+      { kind: 'fort', roof: '#cbb896', label: landmark.name });
   } else if (landmark.kind === 'pier') {
-    b = addBuilding(city, cx - 60, cy - 50, 120, 100, { hgt: 16, wall: '#e8d3ac', kind: 'shack', district: 'beach', name: landmark.name, awning: '#4b8ad9' });
-    city.benches.push({ x: cx - 26, y: rect.y + rect.h, w: 52, h: OCEAN_Y + 130 - (rect.y + rect.h), kind: 'pier' });
+    // The pier is walkable planks reaching into the sea, not a collider.
+    city.props.push({ kind: 'pier', x: cx, y: rect.y + rect.h - 10, w: 60, h: 120 });
   } else if (landmark.kind === 'lighthouse') {
-    b = addBuilding(city, cx - 26, cy - 26, 52, 52, { hgt: 90, wall: '#f2ead8', roof: '#d95f4b', kind: 'lighthouse', district: 'beach', name: landmark.name, windows: false });
+    const w = 54;
+    const h = 54;
+    addBuilding(city, cx - w / 2, cy - h / 2, w, h,
+      { kind: 'lighthouse', roof: '#f2ead8', label: landmark.name });
   }
-  if (b) city.landmarks.push({ name: landmark.name, kind: landmark.kind, x: b.x + b.w / 2, y: b.y + b.h / 2, w: b.w, h: b.h });
-  scatterTrees(city, rect, rng, 3, landmark.kind === 'pier' || landmark.kind === 'lighthouse' || landmark.kind === 'fort' ? 'palm' : 'leaf');
+  scatterTrees(city, rect, rng, 4, 'palm');
 }
 
-// ---- queries ----
-
 export function isOnRoad(city, x, y) {
-  for (const c of city.roadCenters) {
-    if (Math.abs(x - c) <= HALF_ROAD || Math.abs(y - c) <= HALF_ROAD) {
-      if (Math.abs(x - c) <= HALF_ROAD && y >= 0 && y <= WORLD) return true;
-      if (Math.abs(y - c) <= HALF_ROAD && x >= 0 && x <= WORLD) return true;
-    }
+  for (const c of ROAD_CENTERS) {
+    if (Math.abs(x - c) <= ROAD_WIDTH / 2) return true;
+    if (Math.abs(y - c) <= ROAD_WIDTH / 2) return true;
   }
   return false;
 }
 
 export function nearestRoadCenter(v) {
   let best = ROAD_CENTERS[0];
-  let bestD = Math.abs(v - best);
+  let bestD = Infinity;
   for (const c of ROAD_CENTERS) {
     const d = Math.abs(v - c);
     if (d < bestD) { bestD = d; best = c; }
@@ -289,7 +261,6 @@ export function nearestRoadCenter(v) {
   return best;
 }
 
-// Snap a point to the closest point on the road network.
 export function nearestRoadPoint(x, y) {
   const cx = nearestRoadCenter(x);
   const cy = nearestRoadCenter(y);
@@ -305,31 +276,47 @@ export function districtAt(x, y) {
 }
 
 function onPier(city, x, y) {
-  return city.benches.some((p) => p.kind === 'pier' && x >= p.x && x <= p.x + p.w && y >= p.y && y <= p.y + p.h);
+  for (const p of city.props) {
+    if (p.kind === 'pier' && Math.abs(x - p.x) < p.w / 2 && y > p.y - 10 && y < p.y + p.h) return true;
+  }
+  return false;
 }
 
-// Push a circle out of every solid thing: buildings, trees, the sea,
-// the world edge. Returns true when anything pushed.
+// Keep a circle (the player on foot) inside the walkable world.
 export function collideCircle(city, circle) {
-  let hit = false;
   circle.x = clamp(circle.x, circle.radius, WORLD - circle.radius);
   circle.y = clamp(circle.y, circle.radius, WORLD - circle.radius);
   if (circle.y + circle.radius > OCEAN_Y && !onPier(city, circle.x, circle.y)) {
     circle.y = OCEAN_Y - circle.radius;
+  }
+  for (const rect of nearbyEntries(city, circle.x, circle.y, 60)) {
+    circleRectPush(circle, rect);
+  }
+}
+
+// Keep a car out of buildings; returns true when a wall was hit.
+export function collideCar(city, car, halfLen, halfWid) {
+  let hit = false;
+  car.x = clamp(car.x, halfLen, WORLD - halfLen);
+  car.y = clamp(car.y, halfLen, WORLD - halfLen);
+  if (car.y + halfLen > OCEAN_Y && !onPier(city, car.x, car.y)) {
+    car.y = OCEAN_Y - halfLen;
     hit = true;
   }
-  for (const e of nearbyEntries(city, circle.x, circle.y, circle.radius + 20)) {
-    if (e.kind === 'building') {
-      if (circleRectPush(circle, e.ref)) hit = true;
-    } else if (e.kind === 'tree') {
-      const dx = circle.x - e.ref.x;
-      const dy = circle.y - e.ref.y;
-      const rr = circle.radius + 6;
-      const d2 = dx * dx + dy * dy;
-      if (d2 < rr * rr && d2 > 0.001) {
-        const d = Math.sqrt(d2);
-        circle.x = e.ref.x + (dx / d) * rr;
-        circle.y = e.ref.y + (dy / d) * rr;
+  const corners = [
+    { dx: halfLen, dy: halfWid }, { dx: halfLen, dy: -halfWid },
+    { dx: -halfLen, dy: halfWid }, { dx: -halfLen, dy: -halfWid },
+  ];
+  const cos = Math.cos(car.angle);
+  const sin = Math.sin(car.angle);
+  for (const corner of corners) {
+    const wx = car.x + corner.dx * cos - corner.dy * sin;
+    const wy = car.y + corner.dx * sin + corner.dy * cos;
+    const probe = { x: wx, y: wy, radius: 6 };
+    for (const rect of nearbyEntries(city, wx, wy, 40)) {
+      if (circleRectPush(probe, rect)) {
+        car.x += probe.x - wx;
+        car.y += probe.y - wy;
         hit = true;
       }
     }
@@ -337,49 +324,31 @@ export function collideCircle(city, circle) {
   return hit;
 }
 
-// A car is two circles, nose and tail. Push both out, report the impact.
-export function collideCar(city, car, halfLen, halfWid) {
-  const cos = Math.cos(car.angle);
-  const sin = Math.sin(car.angle);
-  let hit = false;
-  for (const along of [halfLen * 0.55, -halfLen * 0.55]) {
-    const probe = { x: car.x + cos * along, y: car.y + sin * along, radius: halfWid };
-    if (collideCircle(city, probe)) {
-      // Move the car body by the same correction the probe received.
-      car.x += probe.x - (car.x + cos * along);
-      car.y += probe.y - (car.y + sin * along);
-      hit = true;
-    }
-  }
-  return hit;
-}
-
 export function randomRoadPoint(city, rng, nearX, nearY, minD, maxD) {
-  for (let tries = 0; tries < 40; tries++) {
+  for (let tries = 0; tries < 24; tries++) {
     const vertical = rng.chance(0.5);
-    const c = rng.pick(city.roadCenters);
-    const along = rng.range(60, WORLD - 60);
-    const x = vertical ? c : along;
-    const y = vertical ? along : c;
-    const d = Math.hypot(x - nearX, y - nearY);
-    if (d >= minD && d <= maxD && y < OCEAN_Y - 40) return { x, y };
+    const c = rng.pick(ROAD_CENTERS);
+    const along = rng.range(120, WORLD - 120);
+    const point = vertical ? { x: c, y: along } : { x: along, y: c };
+    if (nearX === undefined) return point;
+    const d = Math.hypot(point.x - nearX, point.y - nearY);
+    if (d >= minD && d <= maxD) return point;
   }
   return { x: ROAD_CENTERS[4], y: ROAD_CENTERS[4] };
 }
 
 export function randomSidewalkPoint(city, rng) {
-  for (let tries = 0; tries < 30; tries++) {
-    const x = rng.range(80, WORLD - 80);
-    const y = rng.range(80, OCEAN_Y - 80);
-    if (isOnRoad(city, x, y)) continue;
-    const probe = { x, y, radius: 14 };
-    const before = { x, y };
-    collideCircle(city, probe);
-    if (probe.x === before.x && probe.y === before.y) return { x, y };
-  }
-  return { x: 700, y: 700 };
+  const col = rng.int(0, 7);
+  const row = rng.int(0, 7);
+  const rect = blockRect(col, row);
+  const side = rng.int(0, 3);
+  const inset = ROAD_WIDTH / 2 + 8;
+  if (side === 0) return { x: rng.range(rect.x, rect.x + rect.w), y: rect.y - inset + 14 };
+  if (side === 1) return { x: rng.range(rect.x, rect.x + rect.w), y: rect.y + rect.h + inset - 14 };
+  if (side === 2) return { x: rect.x - inset + 14, y: rng.range(rect.y, rect.y + rect.h) };
+  return { x: rect.x + rect.w + inset - 14, y: rng.range(rect.y, rect.y + rect.h) };
 }
 
 export function buildingsInView(city, x0, y0, x1, y1) {
-  return city.buildings.filter((b) => b.x + b.w >= x0 && b.x <= x1 && b.y + b.h >= y0 && b.y <= y1);
+  return city.buildings.filter((b) => b.x + b.w > x0 && b.x < x1 && b.y + b.h > y0 && b.y < y1);
 }

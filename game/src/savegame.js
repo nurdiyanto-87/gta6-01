@@ -1,7 +1,7 @@
-// San Cielo Heat — saving: Mara's wallet, health, weapons and story
-// progress live in localStorage, so Continue picks up where she left off.
+// San Cielo Heat — saving: the player's progress lives in localStorage, so
+// closing the tab keeps money, missions, position and the wanted level.
 
-const SAVE_KEY = 'sancielo-heat-save-v1';
+const SAVE_KEY = 'san-cielo-heat-save-v1';
 
 export function hasSave() {
   try {
@@ -13,26 +13,26 @@ export function hasSave() {
 
 export function saveGameState(game) {
   try {
-    const p = game.player;
+    const player = game.player;
     const data = {
       version: 1,
-      money: Math.floor(p.money),
-      health: Math.floor(p.health),
-      armor: Math.floor(p.armor),
-      x: Math.floor(p.x),
-      y: Math.floor(p.y),
-      weapon: p.weapon,
-      ammo: {
-        pistol: p.weapons.pistol.ammo,
-        smg: p.weapons.smg.ammo,
-      },
-      smgOwned: p.weapons.smg.owned,
+      x: player.inCar ? player.inCar.x : player.x,
+      y: player.inCar ? player.inCar.y : player.y,
+      health: player.health,
+      armor: player.armor,
+      money: player.money,
+      wanted: player.wanted,
+      weapon: player.weapon,
+      ammo: player.ammo,
+      kills: player.kills,
+      carsStolen: player.carsStolen,
+      missionsDone: player.missionsDone,
+      courierDone: player.courierDone,
+      playTime: player.playTime,
       storyIndex: game.missions.storyIndex,
-      completed: game.missions.completed.slice(),
-      couriersDone: game.missions.couriersDone,
-      storyDone: game.missions.storyDone,
-      playTime: Math.floor(game.time),
-      savedAt: Date.now(),
+      completedStory: game.missions.completedStory,
+      courierIndex: game.missions.courierIndex,
+      time: game.time,
     };
     window.localStorage.setItem(SAVE_KEY, JSON.stringify(data));
     return true;
@@ -54,28 +54,31 @@ export function loadGameState() {
 }
 
 export function applySaveState(game, data) {
-  const p = game.player;
-  p.money = data.money;
-  p.health = data.health;
-  p.armor = data.armor;
-  p.x = data.x;
-  p.y = data.y;
-  p.weapon = data.weapon || 'pistol';
-  p.weapons.pistol.ammo = data.ammo.pistol;
-  p.weapons.smg.ammo = data.ammo.smg;
-  p.weapons.smg.owned = !!data.smgOwned;
+  const player = game.player;
+  player.x = data.x;
+  player.y = data.y;
+  player.health = data.health;
+  player.armor = data.armor;
+  player.money = data.money;
+  player.wanted = data.wanted;
+  player.weapon = data.weapon || 'fists';
+  player.ammo = data.ammo || { pistol: 60, smg: 120 };
+  player.kills = data.kills || 0;
+  player.carsStolen = data.carsStolen || 0;
+  player.missionsDone = data.missionsDone || 0;
+  player.courierDone = data.courierDone || 0;
+  player.playTime = data.playTime || 0;
   game.missions.storyIndex = data.storyIndex || 0;
-  game.missions.completed = (data.completed || []).slice();
-  game.missions.couriersDone = data.couriersDone || 0;
-  game.missions.storyDone = !!data.storyDone;
-  game.time = data.playTime || 0;
-  game.camera.snapTo(p.x, p.y);
+  game.missions.completedStory = !!data.completedStory;
+  game.missions.courierIndex = data.courierIndex || 0;
+  game.time = data.time || 0;
+  game.camera.snapTo(data.x, data.y);
 }
 
 export function clearSave() {
   try {
     window.localStorage.removeItem(SAVE_KEY);
   } catch (err) {
-    // Storage unavailable: nothing to clear.
+    // Storage unavailable — nothing to clear.
   }
 }
